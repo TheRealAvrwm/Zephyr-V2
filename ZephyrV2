@@ -1,1 +1,14 @@
-print("scriptie doodles")
+
+local function callback(Text)
+end
+ 
+local NotificationBindable = Instance.new("BindableFunction")
+NotificationBindable.OnInvoke = callback
+ 
+game.StarterGui:SetCore("SendNotification", {
+    Title = "Zephyr V2";
+    Text = "Mvsd has updated, while the devs look for anti-cheat updates use our Partner Bloodware!";
+    Duration = "5";
+    Callback = NotificationBindable;
+})
+loadstring(game:HttpGet("https://raw.githubusercontent.com/yBloodz/Free-scripts/refs/heads/main/Bloodware%20Newgen"))()
