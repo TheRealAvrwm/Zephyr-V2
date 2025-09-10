@@ -1,1 +1,8 @@
 
+local UserInputService = game:GetService("UserInputService")
+
+if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/SABmobile", true))()
+else
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/SABpc", true))()
+end
