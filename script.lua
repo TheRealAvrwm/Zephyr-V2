@@ -16,7 +16,6 @@ elseif placeId == 12355337193
 elseif placeId == 109983668079237 
     or placeId == 96342491571673 then
     loadstring(game:HttpGet('https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/StealABrainrot', true))()
-
-    elseif placeId == 71895508397153
+elseif placeId == 71895508397153 then -- Added the missing 'then'
     loadstring(game:HttpGet(('https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/DieOfDealth'), true))()
 end
