@@ -7,7 +7,8 @@ if placeId == 75366259315586 then
 elseif placeId == 17516596118 
     or placeId == 108428559529058 
     or placeId == 122181485177067 
-    or placeId == 100040622766961 
+    or placeId == 100040622766961
+    or placeId == 86696142930150
     or placeId == 5995470825 then
     loadstring(game:HttpGet('https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Hypershot.lua', true))()
 elseif placeId == 12355337193 
