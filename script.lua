@@ -1,3 +1,5 @@
+pcall(function()
+
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local universeId = game.GameId
@@ -17,4 +19,4 @@ elseif universeId == 6035872082 then
 else 
 loadstring(game:HttpGet('https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/Universal.lua', true))() -- Universal
 end
-
+    end)
