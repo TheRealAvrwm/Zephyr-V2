@@ -1,6 +1,4 @@
 -- Zephyr-V2 Loader
--- Auto-executes hypershot.lua on every teleport
-
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
@@ -9,8 +7,9 @@ local queueTeleport = (syn and syn.queue_on_teleport) or queue_on_teleport
 
 local LOADER_URL = "https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/hypershotloader.lua"
 local SCRIPT_URL = "https://raw.githubusercontent.com/TheRealAvrwm/Zephyr-V2/refs/heads/main/Games/hypershot.lua"
+if _G.ZephyrLoaded then return end
+_G.ZephyrLoaded = true
 loadstring(game:HttpGet(SCRIPT_URL))()
-
 local function queueLoader()
     if not queueTeleport then return end
     pcall(function()
