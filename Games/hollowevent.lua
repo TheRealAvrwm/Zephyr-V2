@@ -9854,10 +9854,34 @@ local function bloxState(session)
 	}
 end
 
+function App.bloxCloseMenu(session)
+	local menu = session.menu
+	if not menu then
+		return
+	end
+	if type(menu.Close) == "function" then
+		pcall(menu.Close, menu)
+	end
+	local ok, currentMenu = pcall(session.interact.GetMenu, session.interact)
+	if ok and currentMenu == menu and type(session.interact.CloseMenu) == "function" then
+		pcall(session.interact.CloseMenu, session.interact)
+		ok, currentMenu = pcall(session.interact.GetMenu, session.interact)
+	end
+	if ok and currentMenu ~= menu then
+		session.menu = nil
+	end
+end
+
 local function bloxReady(session, index)
 	local state = bloxState(session)
 	local model, root, humanoid = character()
 	local menu = session.interact:GetMenu()
+	local target = menu and menu.Target
+	local background = menu
+		and menu.IsBackground == true
+		and state
+		and session.objects[state.name]
+		and session.objects[state.name][target] == true
 	if
 		not state
 		or not state.playing
@@ -9868,7 +9892,7 @@ local function bloxReady(session, index)
 		or humanoid.WalkSpeed <= 0
 		or session.interactionData.ALL_INTERACTIONS_LOCKED
 		or session.halloween.Modules.BuildUI:InBuildMode()
-		or (menu and menu ~= session.menu)
+		or (menu and menu ~= session.menu and not background)
 		or (index and (not state.ongoing or state.index ~= index))
 	then
 		return nil
@@ -9876,7 +9900,7 @@ local function bloxReady(session, index)
 	return model, root, state
 end
 
-local function bloxMove(session, object, position, index, generation, check)
+local function bloxMove(session, object, position, index, generation, check, radius)
 	local model, root = bloxReady(session, index)
 	if not model or not object:IsDescendantOf(workspace) then
 		return nil
@@ -9891,7 +9915,7 @@ local function bloxMove(session, object, position, index, generation, check)
 	if not valid() then
 		return nil
 	end
-	if (position - root.Position).Magnitude > 5 then
+	if (position - root.Position).Magnitude > (radius or 5) then
 		local moved, reason = approach(position, generation, object, false, valid)
 		if not moved then
 			return nil, reason
@@ -9904,73 +9928,80 @@ local function bloxMove(session, object, position, index, generation, check)
 end
 
 local function bloxInteract(session, object, action, index, generation, check)
-	if
-		not active(generation)
-		or not bloxReady(session, index)
-		or not object:IsDescendantOf(workspace)
-		or (check and not check())
-	then
+	local function valid()
+		local _, root = bloxReady(session, index)
+		local origin = object.Parent and session.interactionData:GetOrigin(object, 6)
+		return active(generation)
+			and root
+			and origin
+			and object:IsDescendantOf(workspace)
+			and (root.Position - origin.Position).Magnitude <= 8
+			and session.handler:CanParticipate()
+			and (not check or check())
+	end
+	if not valid() then
 		return nil
 	end
-	local origin = session.interactionData:GetOrigin(object, 6)
-	local _, root = bloxReady(session, index)
-	if not origin or not root or (origin.Position - root.Position).Magnitude > 8 then
-		return nil
+	local menu = session.interact:GetMenu()
+	if menu and menu ~= session.menu and not (menu.IsBackground and menu.Target == object) then
+		return nil, "Close the game's menu to carry on"
 	end
-	local data = session.interactions[object]
-	if not data then
-		if session.interact:GetMenu() then
-			return nil, "Close the game's menu to carry on"
-		end
-		local ok, menu = pcall(session.interact.ShowMenu, session.interact, object, nil, nil, nil, true)
+	if menu and menu.Target ~= object then
+		App.bloxCloseMenu(session)
+		menu = nil
+	end
+	if not menu then
+		local ok, result = pcall(session.interact.ShowMenu, session.interact, object, nil, nil, nil, true)
 		if not ok then
-			return false, "Bloxburg interaction failed: " .. tostring(menu)
+			session.interactions[object] = nil
+			return false, "The interaction didn't open. Retrying."
 		end
-		if type(menu) == "table" then
-			session.menu = menu
-			if menu.IsCustom and type(menu.Data) == "table" then
-				data = menu.Data
-				session.interactions[object] = data
-			end
-			if type(menu.Close) == "function" then
-				pcall(menu.Close, menu)
-			end
-			session.menu = nil
+		menu = result
+	end
+	if type(menu) ~= "table" then
+		return nil, "Waiting for the interaction to appear"
+	end
+	session.menu = menu
+	local function finish(result, detail)
+		App.bloxCloseMenu(session)
+		if not result then
+			session.interactions[object] = nil
 		end
+		return result, detail
 	end
-	if not data then
-		return nil, "Waiting for the minigame controls to load"
+	if not valid() then
+		return finish(nil)
 	end
+	local data = menu.IsCustom and menu.Data
+	if type(data) ~= "table" then
+		return finish(nil, "Waiting for the minigame controls")
+	end
+	session.interactions[object] = data
 	for _, factory in ipairs(data) do
 		if type(factory) ~= "function" then
 			continue
 		end
 		local ok, name, permission, callback = pcall(factory, object)
 		if not ok then
-			return false, "Couldn't use that: " .. tostring(name)
+			return finish(false, "That interaction changed. Retrying.")
 		end
 		if name == action and permission == 0 and type(callback) == "function" then
-			if
-				not active(generation)
-				or not bloxReady(session, index)
-				or not object:IsDescendantOf(workspace)
-				or not session.handler:CanParticipate()
-				or (check and not check())
-			then
-				return nil
+			if not valid() then
+				return finish(nil)
 			end
-			local _, nowRoot = bloxReady(session, index)
-			if not nowRoot or (origin.Position - nowRoot.Position).Magnitude > 8 then
-				return nil
+			local accepted, result
+			if type(menu.Click) == "function" and type(menu.Buttons) == "table" and #menu.Buttons == 1 then
+				accepted, result = pcall(menu.Click, menu, 1)
+			else
+				accepted, result = pcall(callback)
 			end
-			local accepted, why = pcall(callback)
-			if not accepted then
-				return false, "Couldn't finish that action: " .. tostring(why)
+			if not accepted or result == false then
+				return finish(false, "That action didn't go through. Retrying.")
 			end
-			return true
+			return finish(true)
 		end
 	end
-	return nil
+	return finish(nil, "Waiting for that action to be ready")
 end
 
 local function bloxReleaseDoorLook(session)
@@ -10043,18 +10074,24 @@ local function bloxKnock(session, object, index, generation, check)
 			return nil, "Waiting to face the matching door"
 		end
 		look.bound = pcall(function()
-			RunService:BindToRenderStep("HollowBloxDoor", Enum.RenderPriority.Camera.Value + 1, function()
+			local priority = Enum.RenderPriority.Last and Enum.RenderPriority.Last.Value - 1
+				or Enum.RenderPriority.Camera.Value + 1
+			RunService:BindToRenderStep("HollowBloxDoor", priority, function()
 				pcall(aim)
 			end)
 		end)
 		if not pause(0.12, generation) or not aim() then
 			return nil, "The door interaction changed"
 		end
-		return bloxInteract(session, object, "I_Knock", index, generation, aim)
+		local accepted, why = bloxInteract(session, object, "I_Knock", index, generation, aim)
+		if accepted and active(generation) then
+			pause(0.18, generation)
+		end
+		return accepted, why
 	end)
 	bloxReleaseDoorLook(session)
 	if not ok then
-		return false, "Couldn't face the door: " .. tostring(clicked)
+		return false, "The door interaction changed. Retrying."
 	end
 	return clicked, reason
 end
@@ -10153,7 +10190,20 @@ local function bloxChromatic(session, state, generation)
 	if not hue then
 		return nil, "Waiting for the orb's next color"
 	end
-	local ready, skipped = bloxPace(session, "color", string.format("%.3f:%.3f", hue, saturation), 0.35, 0.9, 0.18)
+	local key = string.format("%.3f:%.3f", hue, saturation)
+	local attempt = session.knock
+	if attempt and attempt.key == key then
+		if state.tasks > attempt.tasks or state.earned > attempt.earned then
+			attempt.done = true
+		end
+		if attempt.done then
+			return nil, "Door counted. Waiting for the next color."
+		end
+		if os.clock() < attempt.retryAt then
+			return nil, "Waiting for the knock to count"
+		end
+	end
+	local ready, skipped = bloxPace(session, "color", key, 0.35, 0.9, 0.18)
 	if not ready then
 		return nil, skipped and "Waiting for the next color" or "Watching the colors"
 	end
@@ -10195,12 +10245,24 @@ local function bloxChromatic(session, state, generation)
 	local function sameColor()
 		return center:IsDescendantOf(workspace) and matches(center) and matches(light)
 	end
-	local moved = bloxMove(session, chosen, light.Position, state.index, generation, sameColor)
+	local origin = session.interactionData:GetOrigin(chosen, 6)
+	if not origin then
+		return nil, "Waiting for the door to load"
+	end
+	local moved = bloxMove(session, chosen, origin.Position, state.index, generation, sameColor)
 	if not moved then
 		session.blocked[chosen] = os.clock() + 2
 		return nil, "Looking for a way to the matching tomb"
 	end
 	local clicked, reason = bloxKnock(session, chosen, state.index, generation, sameColor)
+	local retries = attempt and attempt.key == key and (attempt.retries or 0) + 1 or 1
+	session.knock = {
+		key = key,
+		tasks = state.tasks,
+		earned = state.earned,
+		retries = retries,
+		retryAt = os.clock() + math.min(6, 1 + retries),
+	}
 	if clicked then
 		session.blocked[chosen] = os.clock() + 1
 	end
@@ -10245,31 +10307,49 @@ local function bloxRecipe(session, state, generation)
 	if held and held.model ~= model then
 		session.ingredient, held = nil, nil
 	end
+	if not held and equipped.Value then
+		local name = equipped.Value.Name
+		for _, ingredient in ipairs({ "Egg", "Flower", "Mushroom", "FrogTears" }) do
+			if name == ingredient then
+				held = { model = model, name = ingredient, at = os.clock(), tasks = state.tasks, earned = state.earned }
+				session.ingredient = held
+				break
+			end
+		end
+	end
 	if held then
 		if held.delivering then
 			if state.tasks > held.tasks or state.earned > held.earned then
 				session.ingredient, session.unconfirmed = nil, 0
 				return true, "Ingredient delivered"
 			end
-			if os.clock() - held.delivering > 10 then
+			local elapsed = os.clock() - held.delivering
+			if equipped.Value == nil and elapsed >= 3 then
 				session.ingredient = nil
 				session.unconfirmed = (session.unconfirmed or 0) + 1
-				if session.unconfirmed >= 3 then
-					return false, "Three ingredients didn't count. Try Start again next round."
-				end
-				return nil, "That ingredient didn't count. Checking the next recipe."
+				return nil, "Checking the next recipe"
 			end
-			return nil, "Throwing the ingredient"
+			if elapsed >= 5 and equipped.Value then
+				held.delivering = nil
+				held.retryAt = os.clock() + math.min(5, 1 + (held.retries or 0))
+				held.retries = (held.retries or 0) + 1
+				return nil, "Still holding the ingredient. Retrying the drop-off."
+			end
+			return nil, "Waiting for the ingredient to land"
 		end
 		if not equipped.Value then
-			if os.clock() - held.at > 10 then
+			if os.clock() - held.at >= 3 then
 				session.ingredient = nil
-				return false, "The ingredient didn't equip. Try Start again."
+				if held.object then
+					session.interactions[held.object] = nil
+					session.blocked[held.object] = os.clock() + 2
+				end
+				return nil, "Missed the pickup. Trying again."
 			end
 			return nil, "Picking up the ingredient"
 		end
-		if wanted ~= held.name then
-			return nil, "The recipe changed. Waiting for the next request."
+		if (held.retryAt or 0) > os.clock() then
+			return nil, "Getting ready to try the cauldron again"
 		end
 		if not bloxPace(session, "recipeDelivery", held, 0.3, 0.8, 0) then
 			return nil, "Getting ready to throw"
@@ -10282,29 +10362,69 @@ local function bloxRecipe(session, state, generation)
 			if not area or not area:IsA("BasePart") then
 				continue
 			end
-			held.delivering = os.clock()
-			local moved = bloxMove(session, object, area.Position, state.index, generation, function()
-				return session.ingredient == held and equipped.Value ~= nil and bloxRecipeWanted(session) == held.name
-			end)
-			if moved or equipped.Value == nil then
-				return true, "Delivering " .. held.name .. " to the cauldron"
+			local function carrying()
+				return session.ingredient == held and equipped.Value ~= nil
 			end
-			held.delivering = nil
+			local moved = bloxMove(session, object, area.Position, state.index, generation, carrying, 0.8)
+			if not active(generation) or bloxReady(session, state.index) ~= model then
+				return nil
+			end
+			if moved or equipped.Value == nil then
+				held.delivering = os.clock()
+				local entry = session.handler._minigames[state.index]
+				local controller = entry and entry.Module
+				local _, nowRoot = bloxReady(session, state.index)
+				if
+					equipped.Value
+					and controller
+					and type(controller.InAreaUpdate) == "function"
+					and nowRoot
+					and area.Size
+				then
+					local point, size = area.CFrame:PointToObjectSpace(nowRoot.Position), area.Size
+					local inside
+					if size.X <= size.Y and size.X <= size.Z then
+						inside = math.abs(point.Y) <= size.Y / 2 and math.abs(point.Z) <= size.Z / 2
+					elseif size.Y <= size.X and size.Y <= size.Z then
+						inside = math.abs(point.X) <= size.X / 2 and math.abs(point.Z) <= size.Z / 2
+					else
+						inside = math.abs(point.X) <= size.X / 2 and math.abs(point.Y) <= size.Y / 2
+					end
+					if inside and carrying() then
+						pcall(controller.InAreaUpdate, controller, true, nowRoot.Position)
+					end
+				end
+				return true, wanted == held.name and "Delivering " .. held.name or "Clearing the old ingredient"
+			end
 		end
 		return nil, "Waiting for the cauldron to load"
 	end
 	if equipped.Value then
 		return nil, "Put away your item so you can pick up an ingredient"
 	end
+	local _, root = bloxReady(session, state.index)
+	local candidates = {}
 	for object in pairs(session.objects.RecipeRitual) do
 		if
-			object:GetAttribute("Ingredient") ~= wanted
-			or object:GetAttribute("Respawning") == true
-			or not object:IsDescendantOf(workspace)
-			or (session.blocked[object] or 0) > os.clock()
+			object:GetAttribute("Ingredient") == wanted
+			and object:GetAttribute("Respawning") ~= true
+			and object:IsDescendantOf(workspace)
+			and (session.blocked[object] or 0) <= os.clock()
 		then
-			continue
+			local origin = session.interactionData:GetOrigin(object, 6)
+			if origin and root then
+				table.insert(
+					candidates,
+					{ object = object, point = origin.Position, distance = (origin.Position - root.Position).Magnitude }
+				)
+			end
 		end
+	end
+	table.sort(candidates, function(a, b)
+		return a.distance < b.distance
+	end)
+	for _, candidate in ipairs(candidates) do
+		local object = candidate.object
 		local function available()
 			return bloxRecipeWanted(session) == wanted
 				and object:GetAttribute("Respawning") ~= true
@@ -10323,7 +10443,7 @@ local function bloxRecipe(session, state, generation)
 		if not ready then
 			return nil, "Checking the recipe"
 		end
-		local moved = bloxMove(session, object, object:GetPivot().Position, state.index, generation, available)
+		local moved = bloxMove(session, object, candidate.point, state.index, generation, available)
 		if not moved then
 			session.blocked[object] = os.clock() + 3
 			continue
@@ -10331,8 +10451,17 @@ local function bloxRecipe(session, state, generation)
 		local taken, reason = bloxInteract(session, object, "I_Take", state.index, generation, available)
 		if taken then
 			session.pacing.recipePickup = nil
-			session.ingredient =
-				{ model = model, name = wanted, at = os.clock(), tasks = state.tasks, earned = state.earned }
+			session.ingredient = {
+				model = model,
+				object = object,
+				name = wanted,
+				at = os.clock(),
+				tasks = state.tasks,
+				earned = state.earned,
+			}
+		elseif taken == false then
+			session.interactions[object] = nil
+			session.blocked[object] = os.clock() + 2
 		end
 		return taken, reason or "Picking up " .. wanted
 	end
@@ -10340,36 +10469,49 @@ local function bloxRecipe(session, state, generation)
 end
 
 local function runBloxburg(generation)
-	if verify(current, true) == true then
+	local checked, owned = pcall(verify, current, true)
+	if not active(generation) then
+		return false, "Stopped"
+	end
+	if checked and owned == true then
 		return true, "Bloxburg Hollow badge earned"
 	end
-	status("Loading Bloxburg", "Waiting for Bloxburg's Halloween event to load", 0)
-	local object = waitUntil(function()
-		return getPath(App.player, "PlayerScripts", "Modules", "_Event", "HalloweenHandler")
-	end, 40, generation)
-	local halloween, reason = module(object, generation)
-	if not halloween then
-		return false, "The Halloween event hasn't loaded yet: " .. tostring(reason)
+	local halloween, handler
+	while active(generation) do
+		status("Loading Bloxburg", "Waiting for the Halloween event", 0)
+		local object = waitUntil(function()
+			return getPath(App.player, "PlayerScripts", "Modules", "_Event", "HalloweenHandler")
+		end, 25, generation)
+		if object then
+			halloween = module(object, generation)
+		end
+		if halloween then
+			handler = waitUntil(function()
+				local value = halloween.SeasonalMinigames
+				return type(value) == "table"
+					and type(value._minigames) == "table"
+					and type(halloween.Modules) == "table"
+					and halloween.Modules.InteractionHandler
+					and halloween.Modules.BuildUI
+					and type(halloween.Shared) == "table"
+					and halloween.Shared.InteractionData
+					and halloween.Shared.RobloxEventsService
+					and halloween.Shared.BadgesService
+					and value
+			end, 25, generation)
+		end
+		if handler then
+			break
+		end
+		if not pause(2, generation) then
+			return false, "Stopped"
+		end
 	end
-	local handler = waitUntil(function()
-		local value = halloween.SeasonalMinigames
-		return type(value) == "table"
-			and type(value._minigames) == "table"
-			and type(halloween.Modules) == "table"
-			and halloween.Modules.InteractionHandler
-			and halloween.Modules.BuildUI
-			and type(halloween.Shared) == "table"
-			and halloween.Shared.InteractionData
-			and halloween.Shared.RobloxEventsService
-			and halloween.Shared.BadgesService
-			and value
-	end, 60, generation)
-	if not handler then
-		return false, "Let Bloxburg finish loading, then enter the Halloween event arena and press Start."
+	if not active(generation) then
+		return false, "Stopped"
 	end
-	local shared = halloween.Shared
+	local shared, config = halloween.Shared, handler.Config
 	local goal = shared.RobloxEventsService.ROBLOX_EVENT_STANDARD_BADGE_EVENT_CURRENCY
-	local config = handler.Config
 	if
 		goal ~= 15000
 		or type(shared.BadgesService.BADGES) ~= "table"
@@ -10401,11 +10543,9 @@ local function runBloxburg(generation)
 	local connections = {}
 	table.insert(App.cleanups, function()
 		bloxReleaseDoorLook(session)
+		App.bloxCloseMenu(session)
 		for _, connection in ipairs(connections) do
-			connection:Disconnect()
-		end
-		if session.menu and type(session.menu.Close) == "function" then
-			pcall(session.menu.Close, session.menu)
+			pcall(connection.Disconnect, connection)
 		end
 	end)
 	for _, name in ipairs({ "Area", "PumpkinPanic", "ChromaticChaos", "RecipeRitual" }) do
@@ -10430,93 +10570,117 @@ local function runBloxburg(generation)
 			objects[target] = true
 		end
 	end
-	local began, nextBadge, nextAction = os.clock(), 0, 0
-	while active(generation) and os.clock() - began < 7200 do
+	local nextBadge, nextAction, errors = 0, 0, 0
+	local function step()
+		local state = bloxState(session)
+		if not state then
+			status("Loading Bloxburg", "Waiting for your event progress")
+			session.interactions = {}
+			return
+		end
+		local model = character()
+		if session.index ~= state.index or session.model ~= model or not state.ongoing then
+			bloxReleaseDoorLook(session)
+			App.bloxCloseMenu(session)
+			session.index, session.model = state.index, model
+			session.ingredient, session.pumpkin, session.knock, session.pacing = nil, nil, nil, nil
+			session.interactions, session.blocked = {}, {}
+			nextAction = 0
+		end
+		local detail
+		if state.earned >= goal then
+			detail = "15,000 earned! Waiting for the Hollow badge."
+		elseif not bloxReady(session) then
+			detail = "Close build mode or any open menus. I'll carry on when you're ready."
+		elseif not handler:CanParticipate() then
+			detail = "Choose Kid or older to play the minigames"
+		else
+			local inArea = false
+			local _, root = bloxReady(session)
+			for area in pairs(session.objects.Area) do
+				local collider = area:IsDescendantOf(workspace) and area:FindFirstChild("TouchCollider")
+				if collider and collider:IsA("BasePart") then
+					local point = collider.CFrame:PointToObjectSpace(root.Position)
+					if math.abs(point.X) < collider.Size.X / 2 and math.abs(point.Z) < collider.Size.Z / 2 then
+						inArea = true
+						break
+					end
+				end
+			end
+			if not inArea then
+				detail = "Head into the Halloween event arena. I'll start once you're inside."
+			elseif not state.ongoing or not state.name then
+				detail = "Waiting for the next minigame"
+			elseif os.clock() >= nextAction then
+				nextAction = os.clock() + (state.name == "PumpkinPanic" and 0.12 or 0.3)
+				local played
+				if state.name == "PumpkinPanic" then
+					played, detail = bloxPumpkin(session, state, generation)
+				elseif state.name == "ChromaticChaos" then
+					played, detail = bloxChromatic(session, state, generation)
+				elseif state.name == "RecipeRitual" then
+					played, detail = bloxRecipe(session, state, generation)
+				end
+				if not active(generation) then
+					return
+				end
+				if played == false then
+					errors = math.min(errors + 1, 4)
+					nextAction = os.clock() + math.min(6, 0.5 * 2 ^ errors)
+					session.interactions = {}
+					App.bloxCloseMenu(session)
+					detail = "That action didn't go through. Trying again shortly."
+				elseif played then
+					errors = 0
+				end
+				session.detail = detail
+			else
+				detail = session.detail
+			end
+		end
+		if not active(generation) then
+			return
+		end
+		status(
+			"Bloxburg Halloween minigames",
+			string.format(
+				"%d / 15,000 earned  |  %s  |  %d tasks\n%s",
+				math.floor(state.earned),
+				({ PumpkinPanic = "Pumpkin Panic", ChromaticChaos = "Chromatic Chaos", RecipeRitual = "Recipe Ritual" })[state.name]
+					or "Intermission",
+				state.tasks,
+				detail or "Waiting for the next task"
+			),
+			math.min(0.95, state.earned / goal * 0.95)
+		)
+	end
+	while active(generation) do
 		if os.clock() >= nextBadge then
 			nextBadge = os.clock() + 20
-			if verify(current, true) == true then
-				return true, "Bloxburg Hollow badge earned"
-			end
+			local checked, earned = pcall(verify, current, true)
 			if not active(generation) then
 				return false, "Stopped"
 			end
+			if checked and earned == true then
+				return true, "Bloxburg Hollow badge earned"
+			end
 		end
-		local state = bloxState(session)
-		if not state then
-			session.missingAt = session.missingAt or os.clock()
-			status("Loading Bloxburg", "Loading your event progress")
-			if os.clock() - session.missingAt > 60 then
-				return false, "Your event progress didn't load. Enter the Halloween event arena, then press Start."
+		local ok = pcall(step)
+		if not ok and active(generation) then
+			errors = math.min(errors + 1, 4)
+			bloxReleaseDoorLook(session)
+			App.bloxCloseMenu(session)
+			session.interactions = {}
+			status("Retrying Bloxburg", "Waiting for the task to be ready")
+			if not pause(math.min(6, 0.5 * 2 ^ errors), generation) then
+				return false, "Stopped"
 			end
-		else
-			session.missingAt = nil
-			local detail
-			if state.earned >= goal then
-				session.completedAt = session.completedAt or os.clock()
-				detail = "15,000 earned! Waiting for the Hollow badge."
-				if os.clock() - session.completedAt > 90 then
-					return false, "15,000 earned, but the Hollow badge hasn't arrived yet"
-				end
-			elseif not bloxReady(session) then
-				detail = "Finish loading your character and close build mode or any open menus"
-			elseif not handler:CanParticipate() then
-				detail = "Choose Kid or older to play the minigames"
-			else
-				local inArea = false
-				local _, root = bloxReady(session)
-				for area in pairs(session.objects.Area) do
-					local collider = area:IsDescendantOf(workspace) and area:FindFirstChild("TouchCollider")
-					if collider and collider:IsA("BasePart") then
-						local point = collider.CFrame:PointToObjectSpace(root.Position)
-						if math.abs(point.X) < collider.Size.X / 2 and math.abs(point.Z) < collider.Size.Z / 2 then
-							inArea = true
-							break
-						end
-					end
-				end
-				if not inArea then
-					detail = "Head into the Halloween event arena. I'll start once you're inside."
-				else
-					if session.index ~= state.index or not state.ongoing then
-						session.index, session.ingredient, session.pumpkin = state.index, nil, nil
-						session.pacing = nil
-					end
-					if not state.ongoing or not state.name then
-						detail = "Waiting for the next minigame"
-					elseif os.clock() >= nextAction then
-						nextAction = os.clock() + (state.name == "PumpkinPanic" and 0.12 or 0.3)
-						local played
-						if state.name == "PumpkinPanic" then
-							played, detail = bloxPumpkin(session, state, generation)
-						elseif state.name == "ChromaticChaos" then
-							played, detail = bloxChromatic(session, state, generation)
-						elseif state.name == "RecipeRitual" then
-							played, detail = bloxRecipe(session, state, generation)
-						end
-						if played == false then
-							return false, detail
-						end
-						session.detail = detail
-					else
-						detail = session.detail
-					end
-				end
-			end
-			status(
-				"Bloxburg Halloween minigames",
-				string.format("%d / 15,000 earned  |  %s  |  %d tasks\n%s", math.floor(state.earned), ({
-					PumpkinPanic = "Pumpkin Panic",
-					ChromaticChaos = "Chromatic Chaos",
-					RecipeRitual = "Recipe Ritual",
-				})[state.name] or "Intermission", state.tasks, detail or "Waiting for the next task"),
-				math.min(0.95, state.earned / goal * 0.95)
-			)
 		end
 		if not pause(0.1, generation) then
 			return false, "Stopped"
 		end
 	end
-	return false, active(generation) and "Stopped after two hours. The Hollow badge hasn't arrived yet." or "Stopped"
+	return false, "Stopped"
 end
 
 local function toonLife(moving)
