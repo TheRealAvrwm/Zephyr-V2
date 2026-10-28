@@ -1049,7 +1049,26 @@ local function status(title, detail, progress)
 	refresh()
 end
 
+local function pruneConnections()
+	local kept = 0
+	for _, connection in ipairs(App.connections) do
+		if connection.Connected ~= false then
+			kept += 1
+			App.connections[kept] = connection
+		end
+	end
+	for index = #App.connections, kept + 1, -1 do
+		App.connections[index] = nil
+	end
+	App.connectionAdds = 0
+end
+
 local function connect(signal, callback)
+	App.connectionAdds = (App.connectionAdds or 0) + 1
+	if App.connectionAdds >= 64 then
+		pruneConnections()
+	end
+	local lastError, nextLog = nil, 0
 	local connection = signal:Connect(function(...)
 		if not App.alive then
 			return
@@ -1057,7 +1076,11 @@ local function connect(signal, callback)
 		local ok, err = pcall(callback, ...)
 		if not ok then
 			App.errors += 1
-			log(tostring(err):sub(1, 220))
+			local message = tostring(err):sub(1, 220)
+			if message ~= lastError or os.clock() >= nextLog then
+				lastError, nextLog = message, os.clock() + 5
+				log(message)
+			end
 		end
 	end)
 	table.insert(App.connections, connection)
@@ -1099,7 +1122,7 @@ local function call(key, callback, seconds, generation)
 		return false, "Stopped"
 	end
 	if App.pending[key] then
-		return false, "Still waiting for " .. key
+		return false, "Still waiting for " .. tostring(key)
 	end
 	local request = { done = false }
 	App.pending[key] = request
@@ -1124,8 +1147,12 @@ end
 
 local function getPath(root, ...)
 	local object = root
-	for _, name in ipairs({ ... }) do
-		object = object and object:FindFirstChild(name)
+	for index = 1, select("#", ...) do
+		local name = select(index, ...)
+		if not object or name == nil then
+			break
+		end
+		object = object:FindFirstChild(name)
 	end
 	return object
 end
@@ -1237,6 +1264,9 @@ local function character()
 end
 
 local function positionOf(object)
+	if not object then
+		return nil
+	end
 	if object:IsA("BasePart") then
 		return object.Position
 	end
@@ -1417,7 +1447,7 @@ local function rideElevator(part, clientState, objects, generation, floor)
 	local ready = waitUntil(function()
 		return not clientState.isLocked("CharacterBusyState")
 	end, 12, generation)
-	return ready ~= nil, ready and nil or "The elevator ride got stuck. Try again."
+	return ready ~= nil, if ready then nil else "The elevator ride got stuck. Try again."
 end
 
 -- floor 1
@@ -1556,6 +1586,7 @@ local function cleanRun()
 	for index = #cleanups, 1, -1 do
 		pcall(cleanups[index])
 	end
+	pruneConnections()
 end
 
 local function stop()
@@ -4294,7 +4325,7 @@ local function runGarden(generation)
 		local arrived = waitUntil(function()
 			return withinNPC(name)
 		end, 2, generation)
-		return arrived ~= nil, arrived and nil or "Couldn't reach " .. name
+		return arrived ~= nil, if arrived then nil else "Couldn't reach " .. name
 	end
 	local originalCharacter, _, originalHumanoid = character()
 	local originalTool = originalCharacter and originalCharacter:FindFirstChildOfClass("Tool")
@@ -12907,7 +12938,7 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 	else
 		EventInput.release(session)
 	end
-	return began, began and nil or (reason or "The interaction ended early")
+	return began, if began then nil else (reason or "The interaction ended early")
 end
 
 function EventInput.guiPress(object, touch)
@@ -15261,7 +15292,11 @@ function Dandy.enemies(session)
 		session.enemyAt = os.clock() + 0.2
 		for _, object in ipairs(Collection:GetTagged("Twisted")) do
 			local model = object:IsA("Model") and object or object.Parent
-			local root = model and (model.PrimaryPart or model:FindFirstChild("HumanoidRootPart"))
+			local root = if object:IsA("BasePart")
+				then object
+				else model and ((model:IsA("Model") and model.PrimaryPart) or model:FindFirstChild(
+					"HumanoidRootPart"
+				))
 			if root and root:IsA("BasePart") and root:IsDescendantOf(workspace) then
 				session.monsters[root] = true
 			end
@@ -15523,11 +15558,13 @@ function Dandy.pick(session)
 	local target, kind, object, best
 	local entries = Dandy.pumpkins(session)
 	for _, entry in ipairs(entries) do
-		if (session.delayed[entry.target] or 0) <= os.clock() and Dandy.safe(session, entry.point, entry.point) then
-			local distance = (entry.point - root.Position).Magnitude
-			if not best or distance < best then
-				target, kind, object, best = entry.target, entry.kind, entry.object, distance
-			end
+		local distance = (entry.point - root.Position).Magnitude
+		if
+			(not best or distance < best)
+			and (session.delayed[entry.target] or 0) <= os.clock()
+			and Dandy.safe(session, entry.point, entry.point)
+		then
+			target, kind, object, best = entry.target, entry.kind, entry.object, distance
 		end
 	end
 	return target, kind, object, #entries
@@ -17306,14 +17343,17 @@ function Doors.releaseGaze(state)
 end
 
 function Doors.eyeAssist(state)
+	if state.closed then
+		return
+	end
+	if not App.alive or not Doors.settings().eyes or state.entitySuspended or state.unfocused then
+		Doors.releaseGaze(state)
+		return
+	end
 	local model = character()
 	local camera = workspace.CurrentCamera
 	if
-		not App.alive
-		or not Doors.settings().eyes
-		or state.entitySuspended
-		or state.unfocused
-		or not model
+		not model
 		or App.player:GetAttribute("Alive") == false
 		or Doors.value("InGame") ~= true
 		or Doors.value("RunHasBeenEnded") == true
@@ -17330,8 +17370,7 @@ function Doors.eyeAssist(state)
 	end
 	local position = camera.CFrame.Position
 	local gazes, dangerous = {}, false
-	local params = RaycastParams.new()
-	params.FilterType, params.FilterDescendantsInstances = Enum.RaycastFilterType.Exclude, { model }
+	local params = state.gazeParams
 	for _, entity in ipairs(Doors.entities()) do
 		local pursuing = entity.kind == "chase" and entity.name:lower():find("creak", 1, true) ~= nil
 		if (entity.kind ~= "gaze" and not pursuing) or not entity.object:IsDescendantOf(workspace) then
@@ -17339,6 +17378,15 @@ function Doors.eyeAssist(state)
 		end
 		local delta = entity.point - position
 		if delta.Magnitude <= 120 and delta.Magnitude > 0.1 then
+			if not params then
+				params = RaycastParams.new()
+				params.FilterType = Enum.RaycastFilterType.Exclude
+				state.gazeParams = params
+			end
+			if state.gazeCharacter ~= model then
+				params.FilterDescendantsInstances = { model }
+				state.gazeCharacter = model
+			end
 			local hit = workspace:Raycast(position, delta, params)
 			if
 				not hit
@@ -17589,7 +17637,7 @@ function Doors.walkTo(state, point, generation, allowed, tolerance, options)
 	end
 	reached = reached or ready() and (root.Position - point).Magnitude <= tolerance
 	Doors.releaseWalk(state)
-	return reached, reached and nil or "Rechecking the route", (root.Position - startPoint).Magnitude > 8
+	return reached, if reached then nil else "Rechecking the route", (root.Position - startPoint).Magnitude > 8
 end
 
 function Doors.dialFrame()
@@ -18416,31 +18464,37 @@ function Doors.visuals(state)
 end
 
 function Doors.clear(state)
-	Doors.releaseCandy(state)
-	Doors.restoreBrightness(state)
-	Doors.releaseGaze(state)
-	if state.eyeBinding then
-		pcall(function()
-			RunService:UnbindFromRenderStep(state.eyeBinding)
-		end)
+	if not state or state.closed then
+		return
 	end
-	Doors.releaseWalk(state)
-	Doors.releaseKey(state)
-	EventInput.release(state)
-	Doors.releaseTerminal(state)
-	if state.added then
-		state.added:Disconnect()
-	end
-	for _, connection in ipairs(state.connections) do
-		connection:Disconnect()
-	end
-	if state.folder then
-		state.folder:Destroy()
-	end
+	state.closed = true
 	if App.doorsState == state then
 		App.doorsState = nil
 		App.doorsStop = nil
 	end
+	if state.eyeBinding then
+		pcall(RunService.UnbindFromRenderStep, RunService, state.eyeBinding)
+		state.eyeBinding = nil
+	end
+	pcall(Doors.releaseCandy, state)
+	pcall(Doors.restoreBrightness, state)
+	pcall(Doors.releaseGaze, state)
+	pcall(Doors.releaseWalk, state)
+	pcall(Doors.releaseKey, state)
+	pcall(EventInput.release, state)
+	pcall(Doors.releaseTerminal, state)
+	if state.added then
+		pcall(state.added.Disconnect, state.added)
+		state.added = nil
+	end
+	for _, connection in ipairs(state.connections or {}) do
+		pcall(connection.Disconnect, connection)
+	end
+	if state.folder then
+		pcall(state.folder.Destroy, state.folder)
+		state.folder = nil
+	end
+	state.gazeParams, state.gazeCharacter = nil, nil
 end
 
 function Doors.ensure()
@@ -18944,6 +18998,9 @@ function Nights.fuel(session, generation)
 	end
 	local selected, best = nil, math.huge
 	for _, item in ipairs(items:GetChildren()) do
+		if not item:IsA("Model") or not item.PrimaryPart then
+			continue
+		end
 		local fuel, owner = item:GetAttribute("BurnFuel"), item:GetAttribute("Owner")
 		local itemPoint = positionOf(item)
 		if
@@ -21109,19 +21166,35 @@ do
 		return false
 	end
 
-	function Mimic.eyeLit(eye)
+	function Mimic.clearEyes(session)
+		for _, connection in ipairs(session.eyeWatches or {}) do
+			connection:Disconnect()
+		end
+		session.eyeRoot, session.eyeParts, session.eyeWatches = nil, nil, nil
+	end
+
+	function Mimic.eyeLit(eye, session)
 		if not eye then
 			return false
 		end
-		for _, part in ipairs(eye:GetDescendants()) do
-			if part:IsA("BasePart") or part:IsA("Decal") then
-				if part.Transparency < 0.5 then
-					return true
+		local cache = session and session.eyeParts
+		local parts = cache and cache[eye]
+		if not parts then
+			parts = {}
+			for _, part in ipairs(eye:GetDescendants()) do
+				if part:IsA("BasePart") or part:IsA("Decal") then
+					parts[part] = "Transparency"
+				elseif part:IsA("Light") or part:IsA("ParticleEmitter") then
+					parts[part] = "Enabled"
 				end
-			elseif part:IsA("Light") or part:IsA("ParticleEmitter") then
-				if part.Enabled then
-					return true
-				end
+			end
+			if cache then
+				cache[eye] = parts
+			end
+		end
+		for part, property in pairs(parts) do
+			if property == "Transparency" and part.Transparency < 0.5 or property == "Enabled" and part.Enabled then
+				return true
 			end
 		end
 		return false
@@ -21130,13 +21203,25 @@ do
 	function Mimic.watchEyes(session, puzzle)
 		local state = session.eye
 		local mirrors = puzzle and puzzle:FindFirstChild("Mirrors")
+		if session.eyeRoot ~= mirrors then
+			Mimic.clearEyes(session)
+		end
 		if not state or not mirrors then
 			return
+		end
+		if not session.eyeRoot then
+			session.eyeRoot, session.eyeParts, session.eyeWatches = mirrors, {}, {}
+			local function changed()
+				session.eyeParts = {}
+			end
+			for _, signal in ipairs({ mirrors.DescendantAdded, mirrors.DescendantRemoving }) do
+				table.insert(session.eyeWatches, signal:Connect(changed))
+			end
 		end
 		local rises, any = {}, false
 		for i = 1, 4 do
 			local mirror = mirrors:FindFirstChild("Mirror" .. i)
-			local lit = Mimic.eyeLit(mirror and mirror:FindFirstChild("Eye"))
+			local lit = Mimic.eyeLit(mirror and mirror:FindFirstChild("Eye"), session)
 			if lit and not state.lit[i] then
 				rises[#rises + 1] = i
 			end
@@ -21359,6 +21444,8 @@ do
 	end
 
 	function Mimic.release(session)
+		Mimic.clearEyes(session)
+		Mimic.clearMenu(session)
 		EventInput.release(session)
 		if session.wishes and session.wishState and type(session.wishState.interrupt) == "function" then
 			pcall(session.wishState.interrupt)
@@ -21440,19 +21527,47 @@ do
 			or prompt.Enabled == false
 	end
 
+	function Mimic.clearMenu(session)
+		for _, connection in ipairs(session.menuWatches or {}) do
+			connection:Disconnect()
+		end
+		session.menuGui, session.menuLabels, session.menuWatches = nil, nil, nil
+	end
+
 	function Mimic.menu(session, generation)
 		if os.clock() < (session.menuAt or 0) then
 			return
 		end
 		session.menuAt = os.clock() + 0.8
 		local gui = App.player:FindFirstChild("PlayerGui")
-		for _, button in ipairs(gui and gui:GetDescendants() or {}) do
-			if
-				not (button:IsA("TextButton") or button:IsA("TextLabel"))
-				or App.gui and button:IsDescendantOf(App.gui)
-			then
-				continue
+		if gui ~= session.menuGui then
+			Mimic.clearMenu(session)
+			if gui then
+				local labels = {}
+				session.menuGui, session.menuLabels, session.menuWatches = gui, labels, {}
+				local function add(object)
+					if
+						(object:IsA("TextButton") or object:IsA("TextLabel"))
+						and not (App.gui and object:IsDescendantOf(App.gui))
+					then
+						labels[object] = true
+					end
+				end
+				if gui.DescendantAdded then
+					table.insert(session.menuWatches, gui.DescendantAdded:Connect(add))
+					table.insert(
+						session.menuWatches,
+						gui.DescendantRemoving:Connect(function(object)
+							labels[object] = nil
+						end)
+					)
+				end
+				for _, object in ipairs(gui:GetDescendants()) do
+					add(object)
+				end
 			end
+		end
+		for button in pairs(session.menuLabels or {}) do
 			local text = button.Text:gsub("<.->", ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 			local warning = text == "tap anywhere to continue"
 				or text == "click or press any key to continue"
@@ -22676,7 +22791,7 @@ do
 		return out
 	end
 	function Home.choose(session, root, tasks, visitor)
-		local choices = {}
+		local choice
 		local visitorState = Home.read(session, "Global", "visitor_state")
 		local held = Home.read(session, "Player", "item")
 		for _, item in ipairs(Home.prompts(session)) do
@@ -22735,13 +22850,12 @@ do
 			end
 			if point and valid and os.clock() >= (session.retryAt[prompt] or 0) then
 				item.point, item.score = point, rank + (point - root.Position).Magnitude
-				choices[#choices + 1] = item
+				if not choice or item.score < choice.score then
+					choice = item
+				end
 			end
 		end
-		table.sort(choices, function(a, b)
-			return a.score < b.score
-		end)
-		return choices[1]
+		return choice
 	end
 	function Home.interact(session, item, generation)
 		local prompt = item.prompt
@@ -23378,6 +23492,10 @@ do
 		end
 	end
 	function ArcadeGuide.hide(arrow)
+		if arrow.hidden then
+			return
+		end
+		arrow.hidden = true
 		for index, part in ipairs(arrow) do
 			part.Transparency = 1
 			if arrow.faces and arrow.faces[index] then
@@ -23400,17 +23518,17 @@ do
 			return
 		end
 		state.closed = true
-		ArcadeGuide.clearRoute(state)
+		if App.arcadeGuideState == state then
+			App.arcadeGuideState = nil
+		end
+		pcall(ArcadeGuide.clearRoute, state)
 		for _, connection in ipairs(state.connections or {}) do
 			pcall(connection.Disconnect, connection)
 		end
 		state.connections = {}
 		if state.folder then
-			state.folder:Destroy()
+			pcall(state.folder.Destroy, state.folder)
 			state.folder = nil
-		end
-		if App.arcadeGuideState == state then
-			App.arcadeGuideState = nil
 		end
 	end
 	function ArcadeGuide.markers(state, entries)
@@ -23703,6 +23821,7 @@ do
 	end
 	function ArcadeGuide.paint(state, entry, samples, start, blockedAt)
 		local painted = 0
+		local tint = entry.full and "full" or entry.generator and "generator" or "gas"
 		for slot = 1, ArcadeGuide.arrowLimit do
 			local sample = samples[start + slot - 1]
 			if sample and blockedAt and sample.waypoint >= blockedAt then
@@ -23738,24 +23857,42 @@ do
 					end
 					state.arrows[slot] = arrow
 				end
-				local direction = sample.direction - sample.normal * sample.direction:Dot(sample.normal)
-				if direction.Magnitude > 0.1 then
-					painted += 1
-					direction = direction.Unit
-					local side = direction:Cross(sample.normal).Unit
-					local center = sample.ground + sample.normal * 0.12
-					local tip = center + direction * 1.1
+				if
+					arrow.ground ~= sample.ground
+					or arrow.normal ~= sample.normal
+					or arrow.direction ~= sample.direction
+				then
+					local direction = sample.direction - sample.normal * sample.direction:Dot(sample.normal)
+					arrow.ground, arrow.normal, arrow.direction = sample.ground, sample.normal, sample.direction
+					arrow.valid = direction.Magnitude > 0.1
+					if arrow.valid then
+						direction = direction.Unit
+						local side = direction:Cross(sample.normal).Unit
+						local center = sample.ground + sample.normal * 0.12
+						local tip = center + direction * 1.1
+						for arm = 1, 2 do
+							local tail = center - direction * 0.9 + side * (arm == 1 and 0.95 or -0.95)
+							arrow[arm].Size = Vector3.new(0.22, 0.1, (tip - tail).Magnitude)
+							arrow[arm].CFrame = CFrame.lookAt((tail + tip) * 0.5, tip, sample.normal)
+						end
+					end
+				end
+				if arrow.valid and (arrow.hidden or arrow.tint ~= tint) then
+					local color = ArcadeGuide.color(entry)
 					for arm = 1, 2 do
-						local tail = center - direction * 0.9 + side * (arm == 1 and 0.95 or -0.95)
 						local part = arrow[arm]
-						part.Size = Vector3.new(0.22, 0.1, (tip - tail).Magnitude)
-						part.CFrame = CFrame.lookAt((tail + tip) * 0.5, tip, sample.normal)
-						part.Color, part.Transparency = ArcadeGuide.color(entry), 0.05
+						part.Color, part.Transparency = color, 0.05
 						local face = arrow.faces and arrow.faces[arm]
 						if face then
 							face.strip.BackgroundColor3, face.gui.Enabled = part.Color, true
 						end
 					end
+					arrow.hidden, arrow.tint = false, tint
+				end
+				if arrow.valid then
+					painted += 1
+				else
+					ArcadeGuide.hide(arrow)
 				end
 			elseif arrow then
 				ArcadeGuide.hide(arrow)
@@ -24771,89 +24908,113 @@ local function buildUI(parent)
 		end
 		footer.Text = Input.KeyboardEnabled and "INS  /  HIDE OR SHOW" or "DRAG THE HEADER TO MOVE  /  - TO HIDE"
 	end
+	local function setProperty(object, key, value)
+		if object[key] ~= value then
+			object[key] = value
+		end
+	end
 	refresh = function()
 		if not App.alive then
 			return
 		end
-		ui.status.Text, ui.detail.Text = App.status, App.detail
-		ui.fill.Size = UDim2.fromScale(App.progress, 1)
-		ui.start.Text = current
-				and (current.id == "mvsd" or current.id == "rails")
-				and (App.running and "Helpers on" or "Enable helpers")
-			or current and current.manual and "Manual only"
-			or (App.running and "Running" or (App.traveling and "Traveling" or "Start"))
-		ui.start.Active = not App.running and not App.traveling and current ~= nil and not current.manual
+		setProperty(ui.status, "Text", App.status)
+		setProperty(ui.detail, "Text", App.detail)
+		setProperty(ui.fill, "Size", UDim2.fromScale(App.progress, 1))
+		setProperty(
+			ui.start,
+			"Text",
+			current
+					and (current.id == "mvsd" or current.id == "rails")
+					and (App.running and "Helpers on" or "Enable helpers")
+				or current and current.manual and "Manual only"
+				or (App.running and "Running" or (App.traveling and "Traveling" or "Start"))
+		)
+		setProperty(ui.start, "Active", not App.running and not App.traveling and current ~= nil and not current.manual)
 		if ui.duelsModes then
 			local selected = App.duelsMelee == false and "Off" or App.duelsMode
 			for mode, control in pairs(ui.duelsModes) do
-				control.BackgroundColor3 = selected == mode and colors.mint or colors.raised
-				control.TextColor3 = selected == mode and colors.base or colors.text
+				setProperty(control, "BackgroundColor3", selected == mode and colors.mint or colors.raised)
+				setProperty(control, "TextColor3", selected == mode and colors.base or colors.text)
 			end
 		end
 		for name, page in pairs(pages) do
-			page.Visible = App.selected == name
-			tabs[name].TextColor3 = App.selected == name and colors.mint or colors.muted
+			setProperty(page, "Visible", App.selected == name)
+			setProperty(tabs[name], "TextColor3", App.selected == name and colors.mint or colors.muted)
 		end
 		for id, control in pairs(rowLabels) do
-			control.Text = App.rows[id] or "Not checked"
+			setProperty(control, "Text", App.rows[id] or "Not checked")
 		end
 		if ui.floor then
-			ui.floor.Text = tostring(App.floor)
+			setProperty(ui.floor, "Text", tostring(App.floor))
 		end
 		if ui.graveBuying then
-			ui.graveBuying.Text = App.graveAutoBuy and "X" or ""
-			ui.graveBuying.BackgroundColor3 = App.graveAutoBuy and colors.mint or colors.raised
-			ui.graveBuying.TextColor3 = colors.base
+			setProperty(ui.graveBuying, "Text", App.graveAutoBuy and "X" or "")
+			setProperty(ui.graveBuying, "BackgroundColor3", App.graveAutoBuy and colors.mint or colors.raised)
+			setProperty(ui.graveBuying, "TextColor3", colors.base)
 			local shop = App.graveShopState
-			ui.graveSpent.Text = shop and shop.disabled and "Auto-buy paused. Check your last purchase."
-				or string.format("Cash purchases: $%.2f", App.graveSpent or 0)
+			setProperty(
+				ui.graveSpent,
+				"Text",
+				shop and shop.disabled and "Auto-buy paused. Check your last purchase."
+					or string.format("Cash purchases: $%.2f", App.graveSpent or 0)
+			)
 		end
 		if ui.dandyEsp then
-			ui.dandyEsp.Text = App.dandyPumpkinEsp and "Pumpkin ESP: ON" or "Pumpkin ESP: OFF"
-			ui.dandyEsp.BackgroundColor3 = App.dandyPumpkinEsp and colors.mint or colors.raised
-			ui.dandyEsp.TextColor3 = App.dandyPumpkinEsp and colors.base or colors.text
+			setProperty(ui.dandyEsp, "Text", App.dandyPumpkinEsp and "Pumpkin ESP: ON" or "Pumpkin ESP: OFF")
+			setProperty(ui.dandyEsp, "BackgroundColor3", App.dandyPumpkinEsp and colors.mint or colors.raised)
+			setProperty(ui.dandyEsp, "TextColor3", App.dandyPumpkinEsp and colors.base or colors.text)
 		end
 		if ui.eggMode then
-			ui.eggMode.Text = "Direct lap hops: " .. (App.eggCheckpointMode and "ON (experimental)" or "OFF")
-			ui.eggMode.BackgroundColor3 = App.eggCheckpointMode and colors.mint or colors.raised
-			ui.eggMode.TextColor3 = App.eggCheckpointMode and colors.base or colors.text
+			setProperty(
+				ui.eggMode,
+				"Text",
+				"Direct lap hops: " .. (App.eggCheckpointMode and "ON (experimental)" or "OFF")
+			)
+			setProperty(ui.eggMode, "BackgroundColor3", App.eggCheckpointMode and colors.mint or colors.raised)
+			setProperty(ui.eggMode, "TextColor3", App.eggCheckpointMode and colors.base or colors.text)
 		end
 		if ui.mvsdAim then
-			ui.mvsdAim.Text = "Gun silent aim: " .. (App.mvsdSilentAim and "ON" or "OFF")
-			ui.mvsdAim.BackgroundColor3 = App.mvsdSilentAim and colors.mint or colors.raised
-			ui.mvsdAim.TextColor3 = App.mvsdSilentAim and colors.base or colors.text
+			setProperty(ui.mvsdAim, "Text", "Gun silent aim: " .. (App.mvsdSilentAim and "ON" or "OFF"))
+			setProperty(ui.mvsdAim, "BackgroundColor3", App.mvsdSilentAim and colors.mint or colors.raised)
+			setProperty(ui.mvsdAim, "TextColor3", App.mvsdSilentAim and colors.base or colors.text)
 		end
 		if ui.doorsOptions then
 			local settings = Doors.settings()
 			for name, item in pairs(ui.doorsOptions) do
-				item.control.Text = item.title .. (settings[name] and ": ON" or ": OFF")
-				item.control.BackgroundColor3 = settings[name] and colors.mint or colors.raised
-				item.control.TextColor3 = settings[name] and colors.base or colors.text
+				setProperty(item.control, "Text", item.title .. (settings[name] and ": ON" or ": OFF"))
+				setProperty(item.control, "BackgroundColor3", settings[name] and colors.mint or colors.raised)
+				setProperty(item.control, "TextColor3", settings[name] and colors.base or colors.text)
 			end
 		end
 		if ui.arcadeOptions then
 			for _, item in pairs(ui.arcadeOptions) do
 				local enabled = App[item.key] ~= false
-				item.control.Text = item.title .. (enabled and ": ON" or ": OFF")
-				item.control.BackgroundColor3 = enabled and colors.mint or colors.raised
-				item.control.TextColor3 = enabled and colors.base or colors.text
+				setProperty(item.control, "Text", item.title .. (enabled and ": ON" or ": OFF"))
+				setProperty(item.control, "BackgroundColor3", enabled and colors.mint or colors.raised)
+				setProperty(item.control, "TextColor3", enabled and colors.base or colors.text)
 			end
-			ui.arcadeRouteText.Text = App.arcadeGuideText
-				or "Enter a live Arcade round for ground routes and target markers."
+			setProperty(
+				ui.arcadeRouteText,
+				"Text",
+				App.arcadeGuideText or "Enter a live Arcade round for ground routes and target markers."
+			)
 		end
 		if ui.railsTracking then
 			for mode, item in pairs(ui.railsTracking) do
 				local selected = App.railsTracking == mode
-				item.control.Text = item.title .. (selected and ": ON" or "")
-				item.control.BackgroundColor3 = selected and colors.mint or colors.raised
-				item.control.TextColor3 = selected and colors.base or colors.text
+				setProperty(item.control, "Text", item.title .. (selected and ": ON" or ""))
+				setProperty(item.control, "BackgroundColor3", selected and colors.mint or colors.raised)
+				setProperty(item.control, "TextColor3", selected and colors.base or colors.text)
 			end
 			local line = App.railsLine ~= false
-			ui.railsLine.Text = "Guidance line: " .. (line and "ON" or "OFF")
-			ui.railsLine.BackgroundColor3 = line and colors.mint or colors.raised
-			ui.railsLine.TextColor3 = line and colors.base or colors.text
-			ui.railsGuideText.Text = App.railsGuideText
-				or "Enable helpers to mark live keys, bank clues and vault codes."
+			setProperty(ui.railsLine, "Text", "Guidance line: " .. (line and "ON" or "OFF"))
+			setProperty(ui.railsLine, "BackgroundColor3", line and colors.mint or colors.raised)
+			setProperty(ui.railsLine, "TextColor3", line and colors.base or colors.text)
+			setProperty(
+				ui.railsGuideText,
+				"Text",
+				App.railsGuideText or "Enable helpers to mark live keys, bank clues and vault codes."
+			)
 		end
 	end
 	ui.reopen.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -25079,24 +25240,26 @@ local function buildUI(parent)
 end
 
 App.unload = function()
-	if not App.alive then
+	if not App.alive or App.unloading then
 		return
 	end
+	App.unloading = true
+	App.generation += 1
+	App.running = false
 	if App.releaseUI then
 		pcall(App.releaseUI)
 	end
 	if App.dandyEspState then
-		Dandy.setEsp(false)
+		pcall(Dandy.setEsp, false)
 	end
 	if App.doorsState then
-		Doors.clear(App.doorsState)
+		pcall(Doors.clear, App.doorsState)
 	end
 	if App.clearArcadeGuide then
-		App.clearArcadeGuide()
+		pcall(App.clearArcadeGuide)
 	end
-	App.generation += 1
-	App.running, App.alive = false, false
 	cleanRun()
+	App.alive = false
 	for _, connection in ipairs(App.connections) do
 		pcall(connection.Disconnect, connection)
 	end
