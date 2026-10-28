@@ -27,7 +27,7 @@ Logic.games = {
 		alternatePlaces = { 105438027287525 },
 		universe = 1415710834,
 		badges = { 3280908596375106 },
-		objective = "Find the Hollow key, survive Banana and enter the red door",
+		objective = "Find the Hollow key, survive Banana and finish the basement",
 	},
 	{
 		id = "hospital",
@@ -25371,8 +25371,7 @@ do
 	-- banana
 	function Event7.bananaState()
 		local properties = workspace:FindFirstChild("GameProperties")
-		local data = App.player:FindFirstChild("UserDataHolder")
-		local quest = data and data:FindFirstChild("HollowQuest")
+		local quest = getPath(App.player, "UserDataHolder", "HollowQuest")
 		if not properties or not quest or not quest:IsA("BoolValue") then
 			return nil
 		end
@@ -25389,20 +25388,52 @@ do
 		}
 	end
 
+	function Event7.bananaControl(object, limit)
+		local scope, detector, targetPart = object, nil, nil
+		for _ = 1, 4 do
+			if not scope or scope == limit then
+				break
+			end
+			local prompt = scope:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt and EventInput.point(prompt.Parent) then
+				return prompt, nil, Event7.part(prompt.Parent)
+			end
+			local click = scope:FindFirstChildWhichIsA("ClickDetector", true)
+			local part = click and Event7.part(click.Parent)
+			if part and not detector then
+				detector, targetPart = click, part
+			end
+			scope = scope.Parent
+		end
+		return nil, detector, targetPart or Event7.part(object)
+	end
+
 	function Event7.bananaItems()
-		local list = {}
-		local state = Event7.bananaState()
+		if game.PlaceId == 105438027287525 then
+			return Event7.basementItems()
+		end
+		local list, state = {}, Event7.bananaState()
 		if not state then
 			return list
 		end
 		if state.playing and state.team == "Runners" and not state.unlocked then
+			local items = state.map and state.map:FindFirstChild("Items")
 			for _, object in ipairs(Collection:GetTagged("HollowKey")) do
-				local part = Event7.part(object)
-				if part and state.map and object:IsDescendantOf(state.map) then
-					table.insert(
-						list,
-						{ object = object, part = part, title = "Hollow key", color = amber, kind = "key" }
-					)
+				if state.map and object:IsDescendantOf(state.map) then
+					local prompt, click, part = Event7.bananaControl(object, items or state.map)
+					local _, root = character()
+					local keyPart = Event7.part(object)
+					if part and keyPart and (not root or math.abs(keyPart.Position.Y - root.Position.Y) <= 60) then
+						table.insert(list, {
+							object = object,
+							part = part,
+							prompt = prompt,
+							click = click,
+							title = "Hollow key",
+							color = amber,
+							kind = "key",
+						})
+					end
 				end
 			end
 		end
@@ -25435,25 +25466,32 @@ do
 	end
 
 	function Event7.bananas()
-		local list = {}
-		for _, name in ipairs({ "GameBananas", "GameBots" }) do
-			local holder = workspace:FindFirstChild(name)
-			for _, object in ipairs(holder and holder:GetChildren() or {}) do
-				local part = Event7.part(object)
-				if part then
-					table.insert(list, { object = object, part = part, title = "Banana", color = red, kind = "threat" })
-				end
+		local list, seen, instances = {}, {}, {}
+		local function add(object, rendered)
+			if not object or instances[object] or rendered and seen[object.Name] then
+				return
+			end
+			local humanoid = object:FindFirstChildWhichIsA("Humanoid")
+			if humanoid and humanoid.Health <= 0 then
+				return
+			end
+			local part = object:FindFirstChild("HumanoidRootPart")
+				or object:FindFirstChild("RootPart")
+				or Event7.part(object)
+			if part and part:IsA("BasePart") and part:IsDescendantOf(workspace) then
+				seen[object.Name], instances[object] = true, true
+				table.insert(list, { object = object, part = part, title = "Banana", color = red, kind = "threat" })
 			end
 		end
 		for _, player in ipairs(Players:GetPlayers()) do
 			if player ~= App.player and player.Team and player.Team.Name == "Banana" then
-				local part = Event7.part(player.Character)
-				if part then
-					table.insert(
-						list,
-						{ object = player.Character, part = part, title = "Banana", color = red, kind = "threat" }
-					)
-				end
+				add(player.Character)
+			end
+		end
+		for _, name in ipairs({ "GameBots", "GameBananas" }) do
+			local holder = workspace:FindFirstChild(name)
+			for _, object in ipairs(holder and holder:GetChildren() or {}) do
+				add(object, name == "GameBananas")
 			end
 		end
 		return list
@@ -25473,56 +25511,443 @@ do
 			return false
 		end
 		local name = item:FindFirstChild("ItemName", true)
-		return name and name:IsA("StringValue") and name.Value == "HollowKey" or false
+		return name and name:IsA("StringValue") and name.Value == "HollowKey"
+			or item:FindFirstChild("HollowKey", true) ~= nil
 	end
 
-	function Event7.runBanana(generation)
-		local session = { blocked = {} }
-		table.insert(App.cleanups, function()
-			EventInput.release(session)
-		end)
-		local joinAt, badgeAt, doorAt = 0, 0, 0
-		while active(generation) do
-			if os.clock() >= badgeAt then
-				badgeAt = os.clock() + 15
-				if verify(current) then
-					return true, "Hollow badge earned"
+	function Event7.bananaSafeSpot(session, state, threats)
+		local model, root = character()
+		if not root or not state.map then
+			return nil
+		end
+		local points = {}
+		for _, name in ipairs({ "RunnerSpawns", "TokenSpawns" }) do
+			local holder = state.map:FindFirstChild(name)
+			for index, object in ipairs(holder and holder:GetChildren() or {}) do
+				if index > 64 then
+					break
+				end
+				local part = Event7.part(object)
+				if part then
+					table.insert(points, part.Position)
 				end
 			end
+		end
+		for _, point in ipairs(session.safePoints or {}) do
+			table.insert(points, point)
+		end
+		for _, item in ipairs(Event7.bananaItems()) do
+			table.insert(points, item.part.Position)
+		end
+		for _, radius in ipairs({ 45, 90, 125 }) do
+			for angle = 0, 7 do
+				local yaw = angle * math.pi / 4
+				table.insert(points, root.Position + Vector3.new(math.cos(yaw) * radius, 0, math.sin(yaw) * radius))
+			end
+		end
+		local params = RaycastParams.new()
+		local excluded = { model }
+		for _, item in ipairs(threats) do
+			table.insert(excluded, item.object)
+		end
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.Character and player.Character ~= model then
+				table.insert(excluded, player.Character)
+			end
+		end
+		params.FilterType, params.FilterDescendantsInstances = Enum.RaycastFilterType.Exclude, excluded
+		params.RespectCanCollide, params.IgnoreWater = true, true
+		local currentGap = Event7.clearance(root.Position, threats)
+		local best, bestScore, rays = nil, nil, 0
+		for _, point in ipairs(points) do
+			if rays >= 32 then
+				break
+			end
+			if Event7.clearance(point, threats) < math.min(65, currentGap + 18) then
+				continue
+			end
+			rays += 1
+			local hit = workspace:Raycast(point + Vector3.new(0, 10, 0), Vector3.new(0, -40, 0), params)
+			if
+				hit
+				and hit.Instance
+				and hit.Normal.Y > 0.65
+				and math.abs(hit.Position.Y - root.Position.Y) <= 12
+				and hit.Position.Y > workspace.FallenPartsDestroyHeight + 32
+			then
+				local landing = hit.Position + Vector3.new(0, 3, 0)
+				local gap = Event7.clearance(landing, threats)
+				local score = gap - (landing - root.Position).Magnitude * 0.05
+				if gap > currentGap + 15 and (not bestScore or score > bestScore) then
+					best, bestScore = landing, score
+				end
+			end
+		end
+		return best
+	end
+
+	function Event7.evadeBanana(session, state, generation)
+		local model, root = character()
+		if not root or root.Anchored or not state.playing or state.team ~= "Runners" then
+			return false
+		end
+		local threats = Event7.bananas()
+		local gap = Event7.clearance(root.Position, threats)
+		if gap >= 60 then
+			if gap < math.huge and os.clock() >= (session.rememberAt or 0) then
+				session.rememberAt = os.clock() + 2
+				session.safePoints = session.safePoints or {}
+				if #session.safePoints >= 8 then
+					table.remove(session.safePoints, 1)
+				end
+				table.insert(session.safePoints, root.Position)
+			end
+			return false
+		end
+		if os.clock() < (session.evadeAt or 0) then
+			return false
+		end
+		session.evadeAt = os.clock() + 0.4
+		EventInput.release(session)
+		local point = Event7.bananaSafeSpot(session, state, threats)
+		if not point then
+			return false
+		end
+		status("Moving away from Banana", "", 0.3)
+		return approach(point, generation, nil, nil, function()
+			local latest = Event7.bananaState()
+			return App.player.Character == model
+				and latest
+				and latest.playing
+				and latest.team == "Runners"
+				and latest.map == state.map
+				and Event7.clearance(point, Event7.bananas()) > 45
+		end, { streamSeconds = 0.1, streamWait = 0.25, settleSeconds = 0.05 })
+	end
+
+	function Event7.bananaUse(session, item, generation, allowed, fallback)
+		local function ready()
+			local _, root = character()
+			return active(generation)
+				and root
+				and not root.Anchored
+				and item.object:IsDescendantOf(workspace)
+				and item.part.Parent
+				and (not allowed or allowed())
+		end
+		if not ready() then
+			return false
+		end
+		local moved = approach(
+			item.part.Position,
+			generation,
+			nil,
+			nil,
+			ready,
+			{ streamSeconds = 0.15, streamWait = 0.35, settleSeconds = 0.08 }
+		)
+		if not moved or not ready() then
+			return false
+		end
+		if item.kind == "key" and Event7.heldKey(App.player.Character) then
+			return true
+		end
+		local prompt, click = item.prompt, item.click
+		if prompt and prompt.Parent and prompt.Enabled then
+			local used = EventInput.hold(session, prompt, generation, ready)
+			if used and fallback and ready() and type(fireproximityprompt) == "function" then
+				if Event7.face(session, item.part) and pause(0.06, generation) and ready() then
+					local ok, result = call(prompt, function()
+						if ready() then
+							return fireproximityprompt(prompt, prompt.HoldDuration)
+						end
+						return false
+					end, prompt.HoldDuration + 2, generation)
+					used = ok and result ~= false
+				else
+					used = false
+				end
+				EventInput.release(session)
+			end
+			return used
+		elseif click and click.Parent then
+			local _, root = character()
+			if not root or (root.Position - item.part.Position).Magnitude > (click.MaxActivationDistance or 12) then
+				return false
+			end
+			if not Event7.face(session, item.part) then
+				return false
+			end
+			if not pause(0.06, generation) or not ready() then
+				EventInput.release(session)
+				return false
+			end
+			local ok = false
+			if type(fireclickdetector) == "function" then
+				ok = pcall(fireclickdetector, click)
+			end
+			EventInput.release(session)
+			return ok
+		end
+		return Event7.touch(item.part, generation)
+	end
+
+	function Event7.pollBananaBadge(session, generation)
+		if session.badgeBusy or os.clock() < (session.badgeAt or 0) then
+			return
+		end
+		session.badgeBusy, session.badgeAt = true, os.clock() + 15
+		local force = session.forceBadge
+		session.forceBadge = nil
+		task.spawn(function()
+			local ok, owned = pcall(verify, current, force)
+			if active(generation) and not session.closed then
+				session.badge = ok and owned == true
+			end
+			session.badgeBusy = false
+		end)
+	end
+
+	-- basement
+	function Event7.basementState()
+		local holder = workspace:FindFirstChild("HollowCakesHolder")
+		local count = holder and holder:FindFirstChild("CakeCollected")
+		local cake = holder and getPath(holder, "CakePuzzle", "Cake")
+		local goal = 0
+		for _, part in ipairs(cake and cake:GetChildren() or {}) do
+			if part:IsA("BasePart") and tonumber(part.Name) then
+				goal += 1
+			end
+		end
+		if not holder or not count or type(count.Value) ~= "number" or goal < 1 then
+			return nil
+		end
+		return { holder = holder, count = count.Value, goal = goal }
+	end
+
+	function Event7.basementItems(finished)
+		local state, list = Event7.basementState(), {}
+		if not state then
+			return list
+		end
+		if state.count < state.goal and not finished then
+			local slices = state.holder:FindFirstChild("CakeSlices")
+			for _, object in ipairs(slices and slices:GetChildren() or {}) do
+				local prompt, click, part = Event7.bananaControl(object, slices)
+				if part and ((prompt and prompt.Enabled) or click) then
+					table.insert(list, {
+						object = object,
+						part = part,
+						prompt = prompt,
+						click = click,
+						title = "Cake slice",
+						color = amber,
+						kind = "cake",
+					})
+				end
+			end
+		else
+			local object = workspace:FindFirstChild("Badge_Giver")
+			local part = object and object:FindFirstChild("Root")
+			if part and part:IsA("BasePart") then
+				table.insert(
+					list,
+					{ object = object, part = part, title = "Hollow reward", color = mint, kind = "badge" }
+				)
+			end
+		end
+		return list
+	end
+
+	function Event7.basementReady()
+		local model, root, humanoid = character()
+		local camera = workspace.CurrentCamera
+		local frame = getPath(App.player, "PlayerGui", "EffectGui", "CutsceneFrame")
+		return model
+			and not root.Anchored
+			and humanoid.WalkSpeed > 0
+			and camera
+			and camera.CameraType ~= Enum.CameraType.Scriptable
+			and not (frame and frame.Visible)
+	end
+
+	function Event7.runBasement(session, generation)
+		local watch, connection, countAt, scan = nil, nil, 0, 0
+		table.insert(App.cleanups, function()
+			if connection then
+				connection:Disconnect()
+			end
+		end)
+		while active(generation) do
+			Event7.pollBananaBadge(session, generation)
 			if not active(generation) then
 				break
 			end
-			if game.PlaceId == 105438027287525 then
-				status("Inside the red door", "Waiting for the game to award the badge", 0.95)
-				pause(1, generation)
-				continue
+			if session.badge then
+				return true, "Hollow badge earned"
 			end
-			local state = Event7.bananaState()
-			local model, root = character()
-			if not state or not root then
+			local state = Event7.basementState()
+			if not state then
+				status("Loading Banana's Basement", "Waiting for the cake puzzle", 0.85)
+			else
+				local model = character()
+				if session.model ~= model then
+					session.model, session.pendingCake, session.blocked = model, nil, {}
+				end
+				if watch ~= state.holder then
+					if connection then
+						connection:Disconnect()
+					end
+					watch, connection, session.ending = state.holder, nil, false
+				end
+				local cue = watch:FindFirstChild("CueEnd")
+				if not connection and cue and cue:IsA("RemoteEvent") then
+					connection = cue.OnClientEvent:Connect(function()
+						if active(generation) then
+							session.ending = true
+							EventInput.release(session)
+						end
+					end)
+				end
+				if not Event7.basementReady() then
+					status("Watching the basement ending", "", 0.95)
+				elseif state.count >= state.goal or session.ending then
+					if not session.completionKnown then
+						session.completionKnown, session.forceBadge, session.badgeAt = true, true, 0
+					end
+					countAt = countAt == 0 and os.clock() or countAt
+					status("Collecting the Hollow reward", "Waiting for badge credit", 0.98)
+					if os.clock() - countAt > 3 then
+						local reward = Event7.closest(Event7.basementItems(true), session.blocked)
+						if reward then
+							if Event7.bananaUse(session, reward, generation, Event7.basementReady) then
+								session.forceBadge, session.badgeAt = true, os.clock() + 0.5
+							end
+							session.blocked[reward.object] = os.clock() + 5
+						end
+					end
+				else
+					local pending = session.pendingCake
+					if pending then
+						if state.count > pending.count or not pending.object:IsDescendantOf(workspace) then
+							session.pendingCake = nil
+						elseif os.clock() - pending.at < 2 then
+							status("Picking up the cake", "Waiting for it to count", 0.85)
+							pause(0.1, generation)
+							continue
+						else
+							session.pendingCake = nil
+							session.blocked[pending.object] = nil
+						end
+					end
+					local items = Event7.basementItems()
+					local item = Event7.closest(items, session.blocked)
+					status(
+						"Collecting cake slices",
+						state.count .. " / " .. state.goal,
+						0.8 + state.count / state.goal * 0.12
+					)
+					if item then
+						local used = Event7.bananaUse(session, item, generation, function()
+							local latest = Event7.basementState()
+							return Event7.basementReady()
+								and latest
+								and latest.holder == state.holder
+								and latest.count == state.count
+								and not session.ending
+						end, (session.attempts[item.object] or 0) > 0)
+						session.attempts[item.object] = (session.attempts[item.object] or 0) + 1
+						session.blocked[item.object] = os.clock() + (used and 2 or 1)
+						if used then
+							session.pendingCake = { object = item.object, count = state.count, at = os.clock() }
+						end
+					elseif #items == 0 and os.clock() >= (session.scanAt or 0) and not session.ending then
+						session.scanAt, scan = os.clock() + 2, scan % 7 + 1
+						local areas = {
+							{ 660.5, 15.1, 72.3 },
+							{ 649.6, 18.2, 58.9 },
+							{ 671.6, 19.2, 70.5 },
+							{ 714.2, 15.4, 15.1 },
+							{ 632.7, 15.1, 146.6 },
+							{ 653.4, 15.2, 106.6 },
+							{ 690.6, 18.2, 115.7 },
+						}
+						approach(
+							Vector3.new(table.unpack(areas[scan])),
+							generation,
+							nil,
+							nil,
+							Event7.basementReady,
+							{ streamSeconds = 0.2, streamWait = 0.4, settleSeconds = 0.1 }
+						)
+					end
+				end
+			end
+			if not pause(0.15, generation) then
+				break
+			end
+		end
+		return false, "Stopped"
+	end
+
+	function Event7.runBanana(generation)
+		local session = { blocked = {}, attempts = {} }
+		table.insert(App.cleanups, function()
+			session.closed = true
+			EventInput.release(session)
+		end)
+		if game.PlaceId == 105438027287525 then
+			return Event7.runBasement(session, generation)
+		end
+		local joinAt, doorAt = 0, 0
+		while active(generation) do
+			Event7.pollBananaBadge(session, generation)
+			if not active(generation) then
+				break
+			end
+			if session.badge then
+				return true, "Hollow badge earned"
+			end
+			local state, model, root = Event7.bananaState(), character()
+			if not state or not root or root.Anchored then
 				status("Loading Banana Eats", "Waiting for your round data", 0)
 			elseif state.unlocked and state.team == "Lobby" then
-				status("Entering the red door", "", 0.85)
+				status("Entering the red door", "", 0.8)
 				local door = Event7.closest(Event7.bananaItems())
 				if door and os.clock() >= doorAt then
 					doorAt = os.clock() + 15
 					prepareTravel(105438027287525, true)
-					Event7.interact(session, door.prompt, generation, function()
+					Event7.bananaUse(session, door, generation, function()
 						local latest = Event7.bananaState()
 						return latest and latest.unlocked and latest.team == "Lobby"
-					end)
+					end, (session.attempts[door.object] or 0) > 0)
+					session.attempts[door.object] = (session.attempts[door.object] or 0) + 1
 				end
 			elseif state.team == "Runners" and state.playing then
 				if session.model ~= model or session.map ~= state.map then
-					session.model, session.map, session.touched, session.blocked = model, state.map, nil, {}
+					session.model, session.map, session.pending = model, state.map, nil
+					session.blocked, session.attempts, session.safePoints = {}, {}, {}
 				end
-				local threats = Event7.bananas()
-				local holding = Event7.heldKey(model) or session.touched ~= nil or state.unlocked
-				local candidates = {}
+				if Event7.evadeBanana(session, state, generation) then
+					pause(0.1, generation)
+					continue
+				end
+				local holding = Event7.heldKey(model) or state.unlocked
+				local pending = session.pending
+				if pending then
+					if holding or not pending.object:IsDescendantOf(workspace) or os.clock() - pending.at >= 2 then
+						session.pending = nil
+					else
+						status("Picking up the Hollow key", "Waiting for the pickup to count", 0.25)
+						pause(0.1, generation)
+						continue
+					end
+				end
+				local candidates, threats = {}, Event7.bananas()
 				for _, item in ipairs(Event7.bananaItems()) do
 					if
 						(item.kind == "exit" and holding or item.kind == "key" and not holding)
-						and Event7.clearance(item.part.Position, threats) > 28
+						and Event7.clearance(item.part.Position, threats) > 45
 					then
 						table.insert(candidates, item)
 					end
@@ -25534,73 +25959,33 @@ do
 						"",
 						holding and 0.65 or 0.2
 					)
-					local before = model:FindFirstChild("Item")
-					local moved = approach(item.part.Position, generation, nil, nil, function()
-						local latest = Event7.bananaState()
+					local used = Event7.bananaUse(session, item, generation, function()
+						local latest, nowModel, nowRoot = Event7.bananaState(), character()
 						return latest
 							and latest.playing
 							and latest.team == "Runners"
 							and latest.map == state.map
-							and item.part.Parent
-							and Event7.clearance(item.part.Position, Event7.bananas()) > 20
-					end)
-					if moved and active(generation) and App.player.Character == model then
-						local latest = Event7.bananaState()
-						if
-							latest
-							and latest.playing
-							and latest.team == "Runners"
-							and latest.map == state.map
-							and (item.kind == "exit" or not Event7.heldKey(model))
-						then
-							Event7.touch(item.part, generation)
-						end
+							and nowModel == model
+							and nowRoot
+							and Event7.clearance(nowRoot.Position, Event7.bananas()) > 35
+							and Event7.clearance(item.part.Position, Event7.bananas()) > 35
+					end, (session.attempts[item.object] or 0) > 0)
+					session.attempts[item.object] = (session.attempts[item.object] or 0) + 1
+					session.blocked[item.object] = os.clock() + (used and 2 or 1)
+					if used and item.kind == "key" then
+						session.pending = { object = item.object, at = os.clock() }
 					end
-					if moved and item.kind == "key" then
-						waitUntil(function()
-							return Event7.heldKey(model)
-								or model:FindFirstChild("Item") ~= before
-								or not item.object:IsDescendantOf(workspace)
-						end, 1.5, generation)
-						if
-							Event7.heldKey(model)
-							or model:FindFirstChild("Item") and model:FindFirstChild("Item") ~= before
-						then
-							session.touched = item.object
-						end
-					end
-					session.blocked[item.object] = os.clock() + (item.kind == "key" and 5 or 3)
 				else
 					status(
 						holding and "Surviving with the key" or "Looking for a safe key",
-						"Waiting for an open exit",
+						holding and "Waiting for an open exit" or "",
 						holding and 0.5 or 0.1
 					)
-					if Event7.clearance(root.Position, threats) < 45 then
-						local spawns = state.map and state.map:FindFirstChild("RunnerSpawns")
-						local safest, distance = nil, 55
-						for _, spawn in ipairs(spawns and spawns:GetChildren() or {}) do
-							local part = Event7.part(spawn)
-							local gap = part and Event7.clearance(part.Position, threats) or 0
-							if gap > distance then
-								safest, distance = part, gap
-							end
-						end
-						if safest then
-							approach(safest.Position, generation, nil, nil, function()
-								local latest = Event7.bananaState()
-								return latest
-									and latest.playing
-									and latest.team == "Runners"
-									and latest.map == state.map
-							end)
-						end
-					end
 				end
 			elseif state.team == "Banana" then
 				status("You're Banana this round", "Waiting for the next survivor round", 0.1)
 			else
-				session.touched = nil
+				session.pending, session.map = nil, nil
 				status("Waiting for a survivor round", "Find a Hollow key, survive, then enter the red door", 0.05)
 				if os.clock() >= joinAt then
 					joinAt = os.clock() + 10
@@ -25615,7 +26000,9 @@ do
 					end
 				end
 			end
-			pause(0.35, generation)
+			if not pause(0.1, generation) then
+				break
+			end
 		end
 		return false, "Stopped"
 	end
@@ -26550,7 +26937,8 @@ local function buildUI(parent)
 		end)
 	end
 	if current and (current.id == "banana" or current.id == "shawarma" or current.id == "hollow") then
-		local title = current.id == "banana" and "Keys / exits / Banana ESP"
+		local title = current.id == "banana"
+				and (game.PlaceId == 105438027287525 and "Cake + reward ESP" or "Keys / exits / Banana ESP")
 			or current.id == "shawarma" and "Hollow task ESP"
 			or "Torch + pumpkin ESP"
 		ui.event7Title = title
