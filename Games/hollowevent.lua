@@ -19378,6 +19378,136 @@ do
 			and not App.cameraBusy
 			and (not camera or camera.CameraType ~= Enum.CameraType.Scriptable)
 	end
+	function Hospital.objective(session)
+		local label = getPath(App.player, "PlayerGui", "Objective", "Frame", "keys", "objective")
+		local text = label and Hospital.visible(label) and label.Text or session.text or ""
+		if session.objectiveText ~= text then
+			if session.text and text ~= session.text then
+				session.target, session.location = nil, nil
+			end
+			session.objectiveText = text
+			session.revision = (session.revision or 0) + 1
+			session.inspected = setmetatable({}, { __mode = "k" })
+		end
+		return text
+	end
+	function Hospital.bind(session)
+		local net = getPath(Storage, "Util", "Net")
+		for name, callback in pairs({
+			SetObjective = function(text, _, target)
+				if session.text ~= text or session.target ~= target then
+					session.revision = (session.revision or 0) + 1
+				end
+				session.text, session.target, session.location = text, target, nil
+			end,
+			SetObjectiveByLocation = function(location, text)
+				if session.text ~= text or session.location ~= location then
+					session.revision = (session.revision or 0) + 1
+				end
+				session.text, session.target, session.location = text, nil, location
+			end,
+		}) do
+			local remote = net and net:FindFirstChild("RE/" .. name)
+			if remote and remote:IsA("RemoteEvent") and not session.bound[remote] then
+				session.bound[remote] = remote.OnClientEvent:Connect(callback)
+			end
+		end
+	end
+	function Hospital.related(object, target)
+		return object
+			and target
+			and (object == target or object:IsDescendantOf(target) or target:IsDescendantOf(object))
+	end
+	function Hospital.pictureRequested(session, puzzle)
+		local text = Hospital.text(Hospital.objective(session))
+		local target = Hospital.target(session)
+		if session.target and target == session.target then
+			return puzzle and Hospital.related(target, puzzle)
+		end
+		return puzzle
+			and (
+				Hospital.related(target, puzzle)
+				or text:find("puzzle", 1, true)
+				or text:find("tiles", 1, true)
+				or text:find("picture", 1, true) and (text:find("solve", 1, true) or text:find("slid", 1, true))
+			)
+	end
+	function Hospital.inspecting(session)
+		local getter = type(session.lib) == "table" and rawget(session.lib, "GetCurrentInspect")
+		if type(getter) == "function" then
+			local ok, object = pcall(getter)
+			if ok then
+				return object, true
+			end
+		end
+		return nil, false
+	end
+	function Hospital.dismissInspect(session, generation)
+		EventInput.release(session)
+		if not active(generation) then
+			return false
+		end
+		if type(firesignal) == "function" then
+			local ok = pcall(firesignal, Input.InputBegan, {
+				UserInputType = Enum.UserInputType.MouseButton1,
+				KeyCode = Enum.KeyCode.Unknown,
+			}, false)
+			if ok then
+				return true
+			end
+		end
+		return pcall(function()
+			local manager = game:GetService("VirtualInputManager")
+			local point = workspace.CurrentCamera.ViewportSize * 0.5
+			local pressed, why = pcall(manager.SendMouseButtonEvent, manager, point.X, point.Y, 0, true, game, 0)
+			pcall(manager.SendMouseButtonEvent, manager, point.X, point.Y, 0, false, game, 0)
+			if not pressed then
+				error(why)
+			end
+		end)
+	end
+	function Hospital.aim(session, part, generation)
+		local camera = workspace.CurrentCamera
+		if not camera or not Hospital.ready(session, generation) then
+			return false
+		end
+		local look = session.look
+		if not look or look.target ~= part or look.camera ~= camera or look.cameraEpoch ~= App.cameraEpoch then
+			EventInput.endLook(session)
+			look = {
+				camera = camera,
+				kind = camera.CameraType,
+				previous = camera.CFrame,
+				cameraEpoch = App.cameraEpoch,
+				target = part,
+			}
+			session.look = look
+			local function update()
+				if session.look ~= look then
+					return
+				end
+				if
+					not part.Parent
+					or not Hospital.ready(session, generation)
+					or camera ~= workspace.CurrentCamera
+					or camera.CameraType ~= look.kind
+					or look.cameraEpoch ~= App.cameraEpoch
+				then
+					EventInput.endLook(session)
+					return
+				end
+				look.aim = CFrame.lookAt(camera.CFrame.Position, part.Position)
+				camera.CFrame = look.aim
+			end
+			look.update = update
+			local binding = "HollowHospitalLook_" .. tostring(generation)
+			if pcall(RunService.BindToRenderStep, RunService, binding, Enum.RenderPriority.Last.Value - 1, update) then
+				look.binding = binding
+			end
+		end
+		look.update()
+		return pause(0.08, generation) and Hospital.ready(session, generation)
+	end
 	function Hospital.click(session, detector, generation)
 		local part = detector and detector.Parent
 		local camera, _, root = workspace.CurrentCamera, character()
@@ -19391,35 +19521,8 @@ do
 		then
 			return false, "The picture tile is out of reach"
 		end
-		EventInput.endLook(session)
-		local look = {
-			camera = camera,
-			kind = camera.CameraType,
-			previous = camera.CFrame,
-			aim = CFrame.lookAt(camera.CFrame.Position, part.Position),
-			cameraEpoch = App.cameraEpoch,
-		}
-		session.look = look
-		local function aim()
-			if
-				session.look == look
-				and Hospital.ready(session, generation)
-				and workspace.CurrentCamera == camera
-				and camera.CameraType == look.kind
-				and App.cameraEpoch == look.cameraEpoch
-				and part.Parent
-			then
-				look.aim = CFrame.lookAt(camera.CFrame.Position, part.Position)
-				camera.CFrame = look.aim
-			end
-		end
-		aim()
-		local binding = "HollowHospitalClick_" .. tostring(generation)
-		if pcall(RunService.BindToRenderStep, RunService, binding, Enum.RenderPriority.Last.Value - 1, aim) then
-			look.binding = binding
-		end
 		local ok, why = false, "Picture clicking isn't available on this executor"
-		if pause(0.08, generation) and Hospital.ready(session, generation) and App.cameraEpoch == look.cameraEpoch then
+		if Hospital.aim(session, part, generation) then
 			if type(fireclickdetector) == "function" then
 				ok, why = pcall(fireclickdetector, detector)
 				ok = ok and why ~= false
@@ -19450,20 +19553,19 @@ do
 				end
 			end
 		end
-		EventInput.endLook(session)
 		return ok, why
 	end
-	function Hospital.solve(session, puzzle, generation)
+	function Hospital.solve(session, puzzle, generation, allowed)
+		local function ready()
+			return Hospital.ready(session, generation) and (not allowed or allowed())
+		end
 		local board, slots = Hospital.board(puzzle)
 		if not board then
 			return false, "Waiting for the picture tiles to load"
 		end
 		local deadline = os.clock() + 12
 		local moves, why = Logic.solveCandyPicture(board, function()
-			return Hospital.ready(session, generation)
-				and puzzle.Parent
-				and os.clock() < deadline
-				and pause(0.01, generation)
+			return ready() and puzzle.Parent and os.clock() < deadline and pause(0.01, generation)
 		end)
 		if not moves then
 			return false, why
@@ -19474,13 +19576,13 @@ do
 		local center, normal = slots[5].Position, slots[5].CFrame.LookVector
 		local stance = center + Vector3.new(normal.X, 0, normal.Z) * 6
 		local moved, reason = approach(stance, generation, puzzle, false, function()
-			return Hospital.ready(session, generation)
+			return ready()
 		end)
 		if not moved then
 			return false, reason
 		end
 		for step, index in ipairs(moves) do
-			if not Hospital.ready(session, generation) or not Hospital.same(Hospital.board(puzzle), board) then
+			if not ready() or not Hospital.same(Hospital.board(puzzle), board) then
 				return false, "The picture moved, checking it again"
 			end
 			local detector = slots[index]:FindFirstChildWhichIsA("ClickDetector")
@@ -19489,15 +19591,18 @@ do
 			expected[blank], expected[index] = expected[index], 0
 			local accepted = false
 			for attempt = 1, 3 do
+				if not ready() then
+					return false, "Picture interaction paused"
+				end
 				status("Solving the candy picture", string.format("Tile move %d / %d", step, #moves), App.progress)
 				local clicked, problem = Hospital.click(session, detector, generation)
 				if not clicked then
 					return false, problem
 				end
 				waitUntil(function()
-					return not Hospital.ready(session, generation) or not Hospital.same(Hospital.board(puzzle), board)
+					return not ready() or not Hospital.same(Hospital.board(puzzle), board)
 				end, 2, generation)
-				if not Hospital.ready(session, generation) then
+				if not ready() then
 					return false, "Picture interaction paused"
 				end
 				local actual = Hospital.board(puzzle)
@@ -19532,6 +19637,21 @@ do
 		if typeof(target) == "Instance" and target:IsDescendantOf(workspace) then
 			return target
 		end
+		local location = session.location
+		if typeof(location) == "Instance" and location:IsDescendantOf(workspace) then
+			return location
+		end
+		if type(location) == "string" and location ~= "" then
+			local roots = { workspace:FindFirstChild("Rooms"), workspace:FindFirstChild("Misc") }
+			for _, root in pairs(roots) do
+				if root then
+					local found = root:FindFirstChild(location, true)
+					if found then
+						return found
+					end
+				end
+			end
+		end
 		return nearest("HalloweenGuideBeam")
 	end
 	function Hospital.taskPrompt(target)
@@ -19539,6 +19659,20 @@ do
 			return nil
 		end
 		local candidates = target:IsA("ProximityPrompt") and { target } or target:GetDescendants()
+		local parent = target.Parent
+		for _ = 1, 3 do
+			if not parent or parent == workspace then
+				break
+			end
+			local prompt = parent:FindFirstChildOfClass("ProximityPrompt")
+			if prompt then
+				table.insert(candidates, prompt)
+			end
+			if parent:IsA("Model") then
+				break
+			end
+			parent = parent.Parent
+		end
 		for _, prompt in ipairs(candidates) do
 			if prompt:IsA("ProximityPrompt") and prompt.Enabled then
 				local text = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
@@ -19867,6 +20001,48 @@ do
 		end
 		return true
 	end
+	function Hospital.matches(object, text)
+		local name = Hospital.text(object:GetFullName())
+		if object:IsA("ProximityPrompt") then
+			name ..= " " .. Hospital.text(object.ActionText) .. " " .. Hospital.text(object.ObjectText)
+		end
+		for _, pair in ipairs({
+			{ "clipboard", "clipboard" },
+			{ "clipboard", "clip board" },
+			{ "computer", "computer" },
+			{ "keyboard", "computer" },
+			{ "register", "computer" },
+			{ "photo", "camera" },
+			{ "print", "printer" },
+			{ "badge", "badge" },
+			{ "nurse", "nurse" },
+			{ "report", "monitor" },
+			{ "sample", "sample" },
+			{ "identity", "identity" },
+			{ "bell", "bell" },
+			{ "cauldron", "cauldron" },
+			{ "camera", "camera" },
+		}) do
+			if text:find(pair[1], 1, true) and name:find(pair[2], 1, true) then
+				return true
+			end
+		end
+		for word in text:gmatch("[%w_]+") do
+			if
+				#word >= 4
+				and word ~= "patient"
+				and word ~= "check"
+				and word ~= "interact"
+				and word ~= "finish"
+				and word ~= "complete"
+				and word ~= "halloween"
+				and name:find(word, 1, true)
+			then
+				return true
+			end
+		end
+		return false
+	end
 	function Hospital.pick(session, text)
 		local _, root = character()
 		if not root then
@@ -19874,6 +20050,10 @@ do
 		end
 		local target = Hospital.target(session)
 		local marked = Hospital.taskPrompt(target)
+		text = Hospital.text(text)
+		if Hospital.pictureRequested(session, getPath(workspace, "Halloween", "Puzzle")) then
+			return nil
+		end
 		local needed, held = Hospital.needs(session), Hospital.held()
 		local sampler, sample, results
 		for name, tool in pairs(held) do
@@ -19908,6 +20088,7 @@ do
 				if object:IsA("ProximityPrompt") and object.Enabled then
 					local action = Hospital.text(object.ActionText)
 					local desk, room = Hospital.desk(object), Hospital.room(object)
+					local matched = Hospital.matches(object, text)
 					if object == marked then
 						eligible, score = true, 250
 					end
@@ -19947,6 +20128,23 @@ do
 						then
 							eligible, score = true, 140
 						end
+					end
+					if
+						action == "inspect"
+						and not (session.inspected and session.inspected[object])
+						and (
+							object == marked
+							or matched
+							or room and (text:find("clipboard", 1, true) or text:find("report", 1, true))
+						)
+					then
+						eligible, score = true, 230
+					end
+					if action == "inspect" and session.inspected and session.inspected[object] then
+						eligible = false
+					end
+					if matched and action ~= "" and action ~= "inspect" then
+						eligible, score = true, math.max(score, 210)
 					end
 					if action == "take dna sampler" and sampleTask and not sampler and not sample then
 						eligible, score = true, 175
@@ -19998,8 +20196,29 @@ do
 					if desk and not Hospital.available(object.Parent) then
 						eligible = false
 					end
-					if eligible and object == marked then
+					if room and room:GetAttribute("Enabled") == false then
+						eligible = false
+					end
+					local scope = session.scope
+					if
+						eligible
+						and scope
+						and scope.Parent
+						and not target
+						and (room or desk)
+						and (room or desk) ~= scope
+					then
+						eligible = false
+					end
+					if
+						eligible
+						and not object.Parent:IsDescendantOf(workspace:FindFirstChild("Halloween") or object)
+						and (object == marked or matched)
+					then
 						score = math.max(score, 250)
+					end
+					if eligible and object == marked then
+						score = math.max(score, 350)
 					end
 				elseif object:IsA("ClickDetector") and object.MaxActivationDistance > 0 then
 					local machine = Hospital.machine(object)
@@ -20010,6 +20229,22 @@ do
 						and os.clock() >= (session.retry[machine] or 0)
 					then
 						eligible, score = true, 220
+					end
+					if
+						not machine
+						and target
+						and Hospital.related(object.Parent, target)
+						and not Hospital.related(object, getPath(workspace, "Halloween", "Puzzle"))
+					then
+						eligible, score = true, 245
+					end
+					if
+						session.scope
+						and machine
+						and not target
+						and (Hospital.room(machine) or Hospital.desk(machine)) ~= session.scope
+					then
+						eligible = false
 					end
 				end
 				if eligible then
@@ -20030,7 +20265,55 @@ do
 				end
 			end
 		end
+		if not best and session.scope then
+			session.scopeEmptyAt = session.scopeEmptyAt or os.clock()
+			if os.clock() - session.scopeEmptyAt > 4 then
+				session.scope, session.scopeEmptyAt = nil, nil
+			end
+		elseif best then
+			session.scopeEmptyAt = nil
+		end
 		return best, bestItem
+	end
+	function Hospital.hold(session, prompt, generation, allowed)
+		local triggered, connection = false, nil
+		if prompt.Triggered then
+			local ok, result = pcall(prompt.Triggered.Connect, prompt.Triggered, function(player)
+				if player == nil or player == App.player then
+					triggered = true
+				end
+			end)
+			if ok then
+				connection = result
+			end
+		end
+		local before, revision = prompt.ActionText, session.revision
+		local function changed()
+			return triggered
+				or not prompt.Parent
+				or not prompt.Enabled
+				or prompt.ActionText ~= before
+				or session.revision ~= revision
+				or Hospital.busy(prompt.Parent)
+		end
+		local ok, why = EventInput.hold(session, prompt, generation, allowed, { keepLook = true })
+		if active(generation) and allowed() and not changed() and type(fireproximityprompt) == "function" then
+			ok, why = call("Hospital prompt", function()
+				if active(generation) and allowed() and not changed() then
+					return fireproximityprompt(prompt, prompt.HoldDuration)
+				end
+				return false
+			end, prompt.HoldDuration + 2, generation)
+			ok = ok and why ~= false
+		end
+		if connection then
+			pcall(connection.Disconnect, connection)
+		end
+		if not active(generation) then
+			EventInput.release(session)
+			return false, "Stopped"
+		end
+		return changed() or ok, why
 	end
 	function Hospital.action(session, object, item, generation)
 		local model, root, humanoid = character()
@@ -20065,13 +20348,16 @@ do
 		local action = prompt and object.ActionText or "Typing at the computer"
 		status("Animal Hospital", action, App.progress)
 		local before = prompt and object.ActionText
-		local success = prompt and EventInput.hold(session, object, generation, allowed)
+		local revision = session.revision
+		local success = prompt and Hospital.hold(session, object, generation, allowed)
 			or not prompt and Hospital.click(session, object, generation)
 		if not active(generation) then
 			return false
 		end
-		if prompt and (Hospital.desk(object) or Hospital.room(object)) or not prompt and Hospital.machine(object) then
+		if success then
 			local machine = prompt and object.Parent or Hospital.machine(object)
+			machine = machine or object.Parent
+			session.scope = Hospital.room(object) or Hospital.desk(object) or session.scope
 			session.work = {
 				object = object,
 				machine = machine,
@@ -20079,7 +20365,12 @@ do
 				started = os.clock(),
 				before = before or action,
 				seenBusy = Hospital.busy(machine),
+				revision = revision,
+				inspect = prompt and Hospital.text(before) == "inspect",
+				target = Hospital.target(session),
 			}
+		else
+			EventInput.release(session)
 		end
 		session.retry[object] = os.clock() + (success and (prompt and 1.5 or 0.12) or 3)
 		return success
@@ -20089,8 +20380,17 @@ do
 		if not work then
 			return false
 		end
-		if not work.object.Parent or not work.machine.Parent then
+		local function finish()
+			EventInput.release(session)
 			session.work = nil
+		end
+		if not work.object.Parent or not work.machine.Parent then
+			finish()
+			return false
+		end
+		local inspected, knowsInspection = Hospital.inspecting(session)
+		if session.revision ~= work.revision and work.revision ~= nil and not inspected then
+			finish()
 			return false
 		end
 		local busy = Hospital.busy(work.machine)
@@ -20098,12 +20398,12 @@ do
 			work.seenBusy = true
 		end
 		if busy and not Hospital.available(work.machine) then
-			session.work = nil
+			finish()
 			return false
 		end
 		if busy and os.clock() - work.started >= 60 then
-			session.retry[work.object], session.retry[work.machine], session.work =
-				os.clock() + 15, os.clock() + 15, nil
+			session.retry[work.object], session.retry[work.machine] = os.clock() + 15, os.clock() + 15
+			finish()
 			return false
 		end
 		if busy then
@@ -20124,12 +20424,47 @@ do
 			status("Finishing " .. tostring(work.before), "Waiting for the station to finish", App.progress)
 			return true
 		end
+		if work.inspect then
+			if inspected then
+				work.seenInspect = true
+			end
+			if os.clock() - work.started < 1 then
+				return true
+			end
+			if knowsInspection and not inspected and work.seenInspect then
+				session.inspected = session.inspected or setmetatable({}, { __mode = "k" })
+				session.inspected[work.object] = true
+				finish()
+				return false
+			end
+			if inspected or not knowsInspection then
+				if os.clock() >= (work.dismissAt or 0) then
+					work.dismissAt = os.clock() + 1.5
+					work.dismissed = Hospital.dismissInspect(session, generation) or work.dismissed
+				end
+				if os.clock() - work.started > 15 then
+					session.problem = "Close the inspection to continue"
+				end
+				if not knowsInspection and work.dismissed and not work.object.Enabled then
+					session.inspected = session.inspected or setmetatable({}, { __mode = "k" })
+					session.inspected[work.object] = true
+					finish()
+					return false
+				end
+				return true
+			end
+			if os.clock() - work.started > 3 then
+				finish()
+				return false
+			end
+			return true
+		end
 		if
 			work.seenBusy
 			or work.prompt and (not work.object.Enabled or work.object.ActionText ~= work.before)
 			or os.clock() - work.started > 2
 		then
-			session.work = nil
+			finish()
 			return false
 		end
 		return true
@@ -20161,8 +20496,13 @@ do
 				end
 			end
 		end)
+		Hospital.bind(session)
 		if not Hospital.index(session, generation) then
 			return false, "Stopped"
+		end
+		local libObject = getPath(Storage, "Lib")
+		if libObject then
+			session.lib = module(libObject, generation)
 		end
 		local deadline = os.clock() + 3600
 		while active(generation) and os.clock() < deadline do
@@ -20172,29 +20512,16 @@ do
 					return true, "Animal Hospital's Hollow badge is earned"
 				end
 			end
-			local net = getPath(Storage, "Util", "Net")
-			for name, callback in pairs({
-				SetObjective = function(text, _, target)
-					session.text, session.target = text, target
-				end,
-				SetObjectiveByLocation = function(_, text)
-					session.text, session.target = text, nil
-				end,
-			}) do
-				local remote = net and net:FindFirstChild("RE/" .. name)
-				if remote and remote:IsA("RemoteEvent") and not session.bound[remote] then
-					session.bound[remote] = remote.OnClientEvent:Connect(callback)
-				end
-			end
+			Hospital.bind(session)
 			local model = character()
 			if model ~= session.model then
 				EventInput.release(session)
 				session.model, session.work, session.equipped, session.previousTool = model, nil, nil, nil
+				session.scope, session.scopeEmptyAt, session.inspected = nil, nil, nil
 			end
 			local shift = tonumber(Players:GetAttribute("Night"))
 			local prefix = shift and "Shift " .. tostring(shift) .. " | " or ""
-			local objective = getPath(App.player, "PlayerGui", "Objective", "Frame", "keys", "objective")
-			local text = session.text or objective and objective.Text or "Follow the game's current task"
+			local text = Hospital.objective(session)
 			status("Animal Hospital", prefix .. tostring(text), App.progress)
 			if Hospital.ui(session, generation) then
 				if not pause(0.03, generation) then
@@ -20202,20 +20529,27 @@ do
 				end
 				continue
 			end
+			if session.work and Hospital.working(session, generation) then
+				if session.problem then
+					return false, session.problem
+				end
+				if not pause(0.05, generation) then
+					break
+				end
+				continue
+			end
 			if model and Hospital.ready(session, generation) then
 				local puzzle = getPath(workspace, "Halloween", "Puzzle")
-				local board = Hospital.board(puzzle)
+				local board = Hospital.pictureRequested(session, puzzle) and Hospital.board(puzzle)
 				local object, item = Hospital.pick(session, text)
-				if Hospital.working(session, generation) then
-					if not pause(0.05, generation) then
-						break
-					end
-					continue
-				elseif object then
+				if object then
 					Hospital.action(session, object, item, generation)
 				elseif board and os.clock() >= session.nextPuzzle then
 					session.nextPuzzle = os.clock() + 8
-					local solved, reason = Hospital.solve(session, puzzle, generation)
+					local solved, reason = Hospital.solve(session, puzzle, generation, function()
+						return Hospital.pictureRequested(session, puzzle)
+					end)
+					EventInput.release(session)
 					if not solved and active(generation) then
 						status("Candy picture", tostring(reason), App.progress)
 					end
@@ -22003,14 +22337,188 @@ end
 do
 	local Home = {}
 	Home.steps = { "watcher", "inspector", "hallwayChase", "mimic" }
+	Home.throwTasks =
+		{ cleanChildrenRoom = true, cleanGuestBedroom = true, clearParentRoom = true, cleanPoolTable = true }
+	Home.tapTasks = { watcher = true, washDishes = true, washBathroom = true, cleanWindow = true }
+	Home.itemTasks = {
+		mop = { "soakWater", "soakBasementWater" },
+		dish = { "washDishes" },
+		sponge = { "washBathroom" },
+		sprayBottle = { "cleanKitchen" },
+		waterCan = { "waterPlants" },
+		coffeeBean = { "startCaffeeMaker" },
+		pan = { "cookTomorrowsLunch" },
+		pasta = { "cookTomorrowsLunch" },
+		tshirt = { "clearParentRoom", "cleanGuestBedroom", "cleanClothes" },
+		clothesPile = { "cleanClothes" },
+		colaBoxes = { "fillMiniFridge" },
+		waterBottlePack = { "fillMiniFridge" },
+	}
 	function Home.read(session, scope, key)
 		local reader = session.values["read" .. scope]
 		if type(reader) ~= "function" then
 			return nil
 		end
-		local ok, value = pcall(reader, key)
+		local ok, value
+		if scope == "Player" then
+			ok, value = pcall(reader, App.player, key)
+		else
+			ok, value = pcall(reader, key)
+		end
 		if ok then
 			return value
+		end
+		return nil
+	end
+	function Home.itemTask(item, tasks, preferred)
+		if type(item) ~= "string" or type(tasks) ~= "table" then
+			return nil
+		end
+		local ids = Home.itemTasks[item]
+		if item == "basketBall" or item == "carToy" or item:match("^crayon") then
+			ids = { "cleanChildrenRoom" }
+		elseif item:match("^poolBall%d+$") then
+			ids = { "cleanPoolTable" }
+		end
+		if preferred and tasks[preferred] == false and table.find(ids or {}, preferred) then
+			return preferred
+		end
+		for _, id in ipairs(ids or {}) do
+			if tasks[id] == false then
+				return id
+			end
+		end
+		return nil
+	end
+	function Home.attributes(object)
+		local data = object:GetAttributes()
+		for _, child in ipairs(object:GetChildren()) do
+			if child:IsA("StyleDerive") then
+				for key, value in pairs(child:GetAttributes()) do
+					data[key] = value
+				end
+			end
+		end
+		return data
+	end
+	function Home.visible(object)
+		if not object or not object.Parent then
+			return false
+		end
+		while object do
+			if
+				object:IsA("GuiObject") and not object.Visible
+				or object:IsA("LayerCollector") and not object.Enabled
+			then
+				return false
+			end
+			object = object.Parent
+		end
+		return true
+	end
+	function Home.mode(session)
+		local mode = Home.read(session, "Internal", "camera_state")
+		if type(mode) == "string" and mode ~= "" then
+			return mode
+		end
+		local gui = App.player and App.player:FindFirstChild("PlayerGui")
+		for _, pair in ipairs({ { "CameraMain", "camera" }, { "CustomCameraMain", "custom" } }) do
+			for _, object in ipairs(Collection:GetTagged(pair[1])) do
+				local ui = object:IsA("GuiObject") and object or object.Parent
+				if gui and ui and ui:IsA("GuiObject") and ui:IsDescendantOf(gui) and Home.visible(ui) then
+					return pair[2]
+				end
+			end
+		end
+		return "normal"
+	end
+	function Home.normal(session)
+		return not Home.read(session, "Internal", "cinematic") and Home.mode(session) == "normal"
+	end
+	function Home.press(button, generation)
+		local gui = App.player and App.player:FindFirstChild("PlayerGui")
+		if
+			not active(generation)
+			or not gui
+			or not button
+			or not button:IsA("GuiButton")
+			or not button:IsDescendantOf(gui)
+			or not Home.visible(button)
+		then
+			return false
+		end
+		if type(firesignal) == "function" then
+			local ok, result = pcall(firesignal, button.Activated)
+			if ok and result ~= false then
+				return true
+			end
+		end
+		local point, size = button.AbsolutePosition, button.AbsoluteSize
+		return size.X > 0
+			and size.Y > 0
+			and pcall(function()
+				local manager = game:GetService("VirtualInputManager")
+				local inset = game:GetService("GuiService"):GetGuiInset()
+				local x, y = point.X + size.X / 2 + inset.X, point.Y + size.Y / 2 + inset.Y
+				local ok, why = pcall(manager.SendMouseButtonEvent, manager, x, y, 0, true, game, 0)
+				pcall(manager.SendMouseButtonEvent, manager, x, y, 0, false, game, 0)
+				if not ok then
+					error(why)
+				end
+			end)
+	end
+	function Home.exitCamera(session, generation)
+		EventInput.release(session)
+		if Home.normal(session) then
+			session.exitAt, session.exitTries = nil, nil
+			return true
+		end
+		if Home.read(session, "Internal", "cinematic") or os.clock() < (session.exitAt or 0) then
+			return false
+		end
+		session.exitAt = os.clock() + 1
+		session.exitTries = (session.exitTries or 0) + 1
+		local tag = Home.mode(session) == "camera" and "CameraExit" or "CloseCustomCamera"
+		for _, object in ipairs(Collection:GetTagged(tag)) do
+			local button = object:IsA("GuiButton") and object or object.Parent
+			if Home.press(button, generation) then
+				break
+			end
+		end
+		return Home.normal(session)
+	end
+	function Home.infer(item, tasks, preferred)
+		local data, prompt = item.data, item.prompt
+		if type(data.taskId) == "string" then
+			return data.taskId
+		end
+		local id = Home.itemTask(data.spawnItem or data.enableRequirement or data.disableRequirement, tasks, preferred)
+		if id then
+			return id
+		end
+		local name = (prompt:GetFullName() .. " " .. (prompt.ObjectText or "")):lower()
+		if name:find("musicbox", 1, true) or name:find("music box", 1, true) then
+			return "watcher"
+		elseif name:find("dish", 1, true) then
+			return "washDishes"
+		elseif name:find("mop", 1, true) or name:find("puddle", 1, true) then
+			return Home.itemTask("mop", tasks, preferred)
+		end
+		for word in name:gmatch("[%w_]+") do
+			for _, toy in ipairs({
+				"basketBall",
+				"carToy",
+				"crayonBk",
+				"crayonBox",
+				"crayonBu",
+				"crayonG",
+				"crayonJ",
+				"crayonV",
+			}) do
+				if word == toy:lower() then
+					return "cleanChildrenRoom"
+				end
+			end
 		end
 		return nil
 	end
@@ -22140,22 +22648,29 @@ do
 	function Home.prompts(session)
 		local out, seen = {}, {}
 		local intro = workspace:FindFirstChild("intro")
-		local function add(prompt, data)
+		local function add(prompt, data, tag)
 			if
 				prompt
 				and prompt:IsA("ProximityPrompt")
 				and prompt.Enabled
 				and prompt:IsDescendantOf(workspace)
 				and (not intro or not prompt:IsDescendantOf(intro))
-				and not seen[prompt]
 			then
-				seen[prompt] = true
-				out[#out + 1] = { prompt = prompt, data = data or {} }
+				local item = seen[prompt]
+				if not item then
+					item = { prompt = prompt, data = Home.attributes(prompt), tags = {} }
+					seen[prompt] = item
+					out[#out + 1] = item
+				end
+				for key, value in pairs(data or {}) do
+					item.data[key] = value
+				end
+				item.tags[tag] = true
 			end
 		end
-		for _, tag in ipairs({ "TaskPrompt", "MainDoorPrompt", "Custom_Prompt" }) do
+		for _, tag in ipairs({ "Custom_Prompt", "TaskPrompt", "MainDoorPrompt", "ComputerPrompt", "LightSwitchPrompt" }) do
 			for _, object in ipairs(Collection:GetTagged(tag)) do
-				add(object:IsA("ProximityPrompt") and object or object.Parent, object:GetAttributes())
+				add(object:IsA("ProximityPrompt") and object or object.Parent, Home.attributes(object), tag)
 			end
 		end
 		return out
@@ -22163,18 +22678,50 @@ do
 	function Home.choose(session, root, tasks, visitor)
 		local choices = {}
 		local visitorState = Home.read(session, "Global", "visitor_state")
+		local held = Home.read(session, "Player", "item")
 		for _, item in ipairs(Home.prompts(session)) do
 			local prompt, data = item.prompt, item.data
 			local point = EventInput.point(prompt.Parent)
 			local text = (prompt.ObjectText .. " " .. prompt.ActionText .. " " .. prompt:GetFullName()):lower()
-			local taskId = data.taskId
+			local taskId = Home.infer(item, tasks, session.job and session.job.id)
+			item.id = taskId
 			local rank = (taskId == "watcher" or text:find("music", 1, true)) and -1000 or 0
-			local valid = not taskId or not tasks or tasks[taskId] == false
+			local valid = taskId and type(tasks) == "table" and tasks[taskId] == false
+			item.role = "task"
+			if session.job and session.job.id ~= taskId then
+				valid = false
+			end
+			if
+				data.enableRequirement and data.enableRequirement ~= held
+				or data.disableRequirement and data.disableRequirement == held
+				or held
+					and not data.enableRequirement
+					and (data.spawnItem or data.stepId == "take" or text:find("pick up", 1, true))
+			then
+				valid = false
+			end
+			if held and data.enableRequirement == held then
+				rank -= 500
+			end
 			if text:find("reset", 1, true) or text:find("buy", 1, true) or text:find("purchase", 1, true) then
 				valid = false
 			end
-			if text:find("maindoor", 1, true) or text:find("main door", 1, true) then
-				if visitor and visitorState == "knock" then
+			if item.tags.ComputerPrompt then
+				valid = false
+			end
+			if item.tags.LightSwitchPrompt then
+				item.role = "light"
+				valid = not session.job
+					and visitor
+					and visitor.isAnomaly
+					and visitorState == "knock"
+					and text:find("off", 1, true) ~= nil
+				rank = -1500
+			end
+			if item.tags.MainDoorPrompt or text:find("maindoor", 1, true) or text:find("main door", 1, true) then
+				item.role = "visitor"
+				if not session.job and visitor and visitorState == "knock" then
+					valid = true
 					rank = rank - 500
 					if visitor.isAnomaly and (text:find("open", 1, true) or text:find("accept", 1, true)) then
 						valid = false
@@ -22206,7 +22753,7 @@ do
 				and (not root.Anchored or session.prompt == prompt)
 				and prompt.Parent
 				and prompt.Enabled
-				and not Home.read(session, "Internal", "cinematic")
+				and Home.normal(session)
 		end
 		if not allowed() then
 			return false
@@ -22219,6 +22766,338 @@ do
 		session.retryAt[prompt] = os.clock() + math.max(2, prompt.HoldDuration + 1)
 		return ok
 	end
+	function Home.detector(session, job)
+		local _, root = character()
+		local camera = workspace.CurrentCamera
+		local found, score
+		for _, object in ipairs(Collection:GetTagged("TaskDetector")) do
+			local detector = object:IsA("ClickDetector") and object or object.Parent
+			if
+				detector
+				and detector:IsA("ClickDetector")
+				and detector:IsDescendantOf(workspace)
+				and detector.MaxActivationDistance > 0
+			then
+				local data = Home.attributes(object)
+				local point = EventInput.point(detector.Parent)
+				local same = data.taskId == job.id
+					or not data.taskId and job.source and detector:IsDescendantOf(job.source)
+				if not data.taskId and point and job.anchor and camera then
+					same = same
+						or (point - job.anchor).Magnitude < 18 and (point - camera.CFrame.Position).Magnitude < 18
+				end
+				if same and point and root and (point - root.Position).Magnitude <= detector.MaxActivationDistance then
+					local distance = camera and (point - camera.CFrame.Position).Magnitude
+						or (point - root.Position).Magnitude
+					if detector == job.detector then
+						distance -= 100
+					end
+					if not score or distance < score then
+						found, score = detector, distance
+					end
+				end
+			end
+		end
+		job.detector = found
+		return found
+	end
+	function Home.click(session, job, generation, held)
+		if not active(generation) or Home.read(session, "Internal", "cinematic") then
+			return false
+		end
+		if os.clock() < (job.clickAt or 0) then
+			return true
+		end
+		job.clickAt = os.clock() + (Home.throwTasks[job.id] and 0.2 or 0.05)
+		if job.id == "watcher" or Home.throwTasks[job.id] and held then
+			return session.events and type(session.events.fire) == "function" and pcall(session.events.fire, "click")
+		end
+		local detector = Home.detector(session, job)
+		if not detector then
+			return false
+		end
+		if type(fireclickdetector) == "function" then
+			local ok, result = pcall(fireclickdetector, detector)
+			if ok and result ~= false then
+				return true
+			end
+		end
+		local camera, point = workspace.CurrentCamera, EventInput.point(detector.Parent)
+		if not camera or not point then
+			return false
+		end
+		local screen, visible = camera:WorldToScreenPoint(point)
+		if not visible then
+			return false
+		end
+		return pcall(function()
+			local manager = game:GetService("VirtualInputManager")
+			local ok, why = pcall(manager.SendMouseButtonEvent, manager, screen.X, screen.Y, 0, true, game, 0)
+			pcall(manager.SendMouseButtonEvent, manager, screen.X, screen.Y, 0, false, game, 0)
+			if not ok then
+				error(why)
+			end
+		end)
+	end
+	function Home.adoptCamera(session, tasks)
+		local camera, _, root = workspace.CurrentCamera, character()
+		if not camera or not root then
+			return nil
+		end
+		local held = Home.read(session, "Player", "item")
+		local heldId = Home.itemTask(held, tasks)
+		if heldId and Home.tapTasks[heldId] then
+			local job = { id = heldId, anchor = root.Position }
+			if Home.detector(session, job) then
+				return job
+			end
+		end
+		for _, item in ipairs(Home.prompts(session)) do
+			local id = Home.infer(item, tasks)
+			local pose = item.data.cframe
+			if
+				id
+				and tasks
+				and tasks[id] == false
+				and Home.tapTasks[id]
+				and typeof(pose) == "CFrame"
+				and (pose.Position - camera.CFrame.Position).Magnitude < 5
+			then
+				return { id = id, anchor = EventInput.point(item.prompt.Parent), source = item.prompt.Parent }
+			end
+		end
+		return nil
+	end
+	function Home.light(session, visitor)
+		if os.clock() < (session.lightAt or 0) then
+			return session.lightTarget
+		end
+		session.lightAt, session.lightTarget = os.clock() + 0.25, nil
+		local state = Home.read(session, "Global", "visitor_state")
+		if not visitor or not visitor.isAnomaly or (state ~= "knock" and state ~= "idle") then
+			return nil
+		end
+		for _, item in ipairs(Home.prompts(session)) do
+			if item.tags.LightSwitchPrompt and (item.prompt.ActionText or ""):lower():find("off", 1, true) then
+				item.role, item.point = "light", EventInput.point(item.prompt.Parent)
+				session.lightTarget = item
+				return item
+			end
+		end
+		return nil
+	end
+	function Home.step(session, tasks, visitor, generation)
+		if not active(generation) then
+			return nil, "Stopped"
+		end
+		local model, root = character()
+		if not model then
+			EventInput.release(session)
+			return 0.12
+		end
+		if session.character and session.character ~= model then
+			EventInput.release(session)
+			session.job, session.utility, session.exitAt, session.exitTries = nil, nil, nil, nil
+		end
+		session.character = model
+		local function note(text)
+			status(session.title, text, session.progress or App.progress)
+		end
+		if Home.read(session, "Internal", "cinematic") then
+			EventInput.release(session)
+			note("Waiting for the scene to finish")
+			return 0.12
+		end
+		if type(tasks) ~= "table" then
+			EventInput.release(session)
+			note("Waiting for the house tasks to load")
+			return 0.2
+		end
+		local mode, held = Home.mode(session), Home.read(session, "Player", "item")
+		local job = session.job
+		if job and job.id and type(tasks) == "table" and tasks[job.id] ~= false then
+			job.finished = true
+		end
+		local light = Home.light(session, visitor)
+		if mode ~= "normal" then
+			if not job and mode == "custom" and not light then
+				job = Home.adoptCamera(session, tasks)
+				if job then
+					job.started, job.cameraOwned = os.clock(), true
+					session.job = job
+				end
+			end
+			if job and mode == "custom" and not job.finished and not light then
+				job.cameraOwned = job.cameraOwned or os.clock() < (job.cameraExpectedUntil or 0)
+				if job.cameraOwned then
+					job.pending, job.retryTarget = nil, nil
+					job.tapStarted = job.tapStarted or os.clock()
+					note(session.labels[job.id] or "Finishing this task")
+					if Home.tapTasks[job.id] then
+						if Home.click(session, job, generation, held) then
+							job.noInputAt = nil
+						else
+							job.noInputAt = job.noInputAt or os.clock()
+							if os.clock() - job.noInputAt > 8 then
+								return nil, "Couldn't tap this task's control. Press Start to retry."
+							end
+						end
+					end
+					if os.clock() - job.tapStarted > 120 then
+						return nil, "This task isn't finishing. Stopped here so nothing else gets started."
+					end
+					return 0.05
+				end
+			end
+			note("Leaving the camera view")
+			Home.exitCamera(session, generation)
+			if (session.exitTries or 0) >= 8 and not Home.normal(session) then
+				return nil, "Couldn't close the camera view. Close it, then press Start."
+			end
+			return 0.1
+		end
+		session.exitAt, session.exitTries = nil, nil
+		if session.utility then
+			local pending = session.utility
+			if
+				not pending.prompt.Parent
+				or not pending.prompt.Enabled
+				or pending.prompt.ActionText ~= pending.action
+				or Home.read(session, "Global", "visitor_state") ~= pending.state
+			then
+				session.utility, session.lightTarget, session.lightAt = nil, nil, 0
+				session.progressAt = os.clock()
+			elseif os.clock() - pending.at > 6 then
+				return nil, "That interaction didn't finish. Stopped before trying anything else."
+			end
+			return 0.12
+		end
+		if light then
+			note("Turning off the lights")
+			local action, state = light.prompt.ActionText, Home.read(session, "Global", "visitor_state")
+			if Home.interact(session, light, generation) then
+				session.utility = { prompt = light.prompt, action = action, state = state, at = os.clock() }
+			end
+			return 0.12
+		end
+		if job and job.finished then
+			EventInput.release(session)
+			session.job, session.progressAt = nil, os.clock()
+			return 0.12
+		end
+		if job then
+			job.cameraOwned, job.tapStarted = nil, nil
+			if held ~= job.held then
+				job.held, job.lastProgress = held, os.clock()
+				session.progressAt = os.clock()
+			end
+			if job.pending then
+				local pending = job.pending
+				if
+					held ~= pending.held
+					or not pending.pickup
+						and (not pending.prompt.Parent or not pending.prompt.Enabled or pending.prompt.ActionText ~= pending.action)
+				then
+					job.pending, job.retryTarget, job.rejects, job.lastProgress = nil, nil, 0, os.clock()
+					session.progressAt = os.clock()
+				elseif os.clock() - pending.at < (pending.pickup and 8 or 5) then
+					note("Waiting for this step to finish")
+					return 0.12
+				else
+					if pending.pickup then
+						return nil, "The picked-up item hasn't arrived. Stopped before grabbing another."
+					end
+					job.retryTarget = pending.target
+					job.pending = nil
+					job.rejects = (job.rejects or 0) + 1
+					if job.rejects >= 3 then
+						return nil, "This task isn't responding. Stopped before starting another one."
+					end
+				end
+			end
+			if Home.throwTasks[job.id] and held and Home.itemTask(held, tasks, job.id) == job.id then
+				note(session.labels[job.id] or "Putting this item away")
+				Home.click(session, job, generation, held)
+				if os.clock() - (job.lastProgress or job.started) > 30 then
+					return nil, "This item hasn't been put away. Stopped before picking up another."
+				end
+				return 0.05
+			end
+			if os.clock() - (job.lastProgress or job.started) > 180 then
+				return nil, "This task is stuck. Stopped here so another task won't interrupt it."
+			end
+		end
+		if not job and held then
+			local id = Home.itemTask(held, tasks)
+			if id then
+				job = { id = id, started = os.clock(), lastProgress = os.clock(), held = held }
+				session.job = job
+				return 0.05
+			end
+			note("Put down the held item before starting another task")
+			return 0.2
+		end
+		if root.Anchored or App.cameraBusy then
+			return 0.12
+		end
+		local target = job and job.retryTarget
+		if target and (not target.prompt.Parent or not target.prompt.Enabled) then
+			job.retryTarget, target = nil, nil
+		end
+		target = target or Home.choose(session, root, tasks, visitor)
+		if not target then
+			note(
+				job and (session.labels[job.id] or "Waiting for this task's next step")
+					or "Waiting for the next task or visitor"
+			)
+			return 0.12
+		end
+		if not job and target.id then
+			job = { id = target.id, started = os.clock(), lastProgress = os.clock(), held = held }
+			session.job = job
+		end
+		if job then
+			job.anchor, job.source = target.point, target.prompt.Parent
+			job.cameraExpectedUntil = os.clock() + 5
+		end
+		note(
+			job and (session.labels[job.id] or "Finishing this task")
+				or ((target.prompt.ActionText or "") .. " " .. (target.prompt.ObjectText or ""))
+		)
+		local action, visitorState = target.prompt.ActionText, Home.read(session, "Global", "visitor_state")
+		local ok = Home.interact(session, target, generation)
+		if not active(generation) then
+			return nil, "Stopped"
+		end
+		if job then
+			if
+				ok
+				or Home.mode(session) ~= "normal"
+				or Home.read(session, "Player", "item") ~= held
+				or not target.prompt.Parent
+			then
+				job.pending = {
+					target = target,
+					prompt = target.prompt,
+					action = action,
+					held = held,
+					at = os.clock(),
+					pickup = target.data.spawnItem ~= nil
+						or target.data.stepId == "take"
+						or target.data.disableRequirement ~= nil and target.data.enableRequirement == nil
+						or (action or ""):lower():find("pick", 1, true) ~= nil,
+				}
+			else
+				job.rejects = (job.rejects or 0) + 1
+				if job.rejects >= 3 then
+					return nil, "Couldn't start this task. Stopped before trying another one."
+				end
+			end
+		elseif ok then
+			session.utility = { prompt = target.prompt, action = action, state = visitorState, at = os.clock() }
+		end
+		return 0.12
+	end
 	function Home.run(generation)
 		status("Loading Home Alone", "Waiting for the event data", 0)
 		local object = waitUntil(function()
@@ -22230,12 +23109,27 @@ do
 		if not values or not registry then
 			return false, "Home Alone's game data hasn't loaded. Press Start to retry."
 		end
-		local session = { values = values, retryAt = {}, badgeAt = 0, progressAt = os.clock() }
+		local session = { values = values, retryAt = {}, badgeAt = 0, progressAt = os.clock(), labels = {} }
+		local taskData = module(getPath(Storage, "Data", "Tasks"), generation)
+		for id, data in pairs(taskData and taskData.tasks or {}) do
+			session.labels[id] = data.displayText
+		end
 		table.insert(App.cleanups, function()
 			EventInput.release(session)
+			if
+				App.player.Character == session.character
+				and session.job
+				and session.job.cameraOwned
+				and Home.mode(session) == "custom"
+				and not Home.read(session, "Internal", "cinematic")
+			then
+				session.exitAt = 0
+				Home.exitCamera(session)
+			end
 		end)
 		local eventObject = getPath(Storage, "Utils", "Event")
 		local events = eventObject and module(eventObject, generation)
+		session.events = events
 		local visitorObject = getPath(Storage, "Client", "VisitorClient")
 		local visitors = visitorObject and module(visitorObject, generation)
 		if events and type(events.connect) == "function" then
@@ -22263,6 +23157,7 @@ do
 		end
 		local previous
 		while active(generation) do
+			local delay = 0.12
 			local steps = Home.read(session, "Owner", "theHollowSteps")
 			local count = Home.count(steps)
 			if os.clock() >= session.badgeAt then
@@ -22290,12 +23185,19 @@ do
 					end
 				end
 				local model, root = character()
-				session.character = model
 				local cinematic = Home.read(session, "Internal", "cinematic")
-				local cameraState = Home.read(session, "Internal", "camera_state")
 				local title = "Home Alone | " .. count .. " / 4 encounters"
+				session.title = title
+				session.progress = count / 4
 				if cinematic then
+					EventInput.release(session)
 					status(title, "Waiting for the game's scene to finish", count / 4)
+				elseif not Home.normal(session) or session.utility or Home.light(session, visitor) then
+					local why
+					delay, why = Home.step(session, tasks, visitor, generation)
+					if not delay then
+						return false, why
+					end
 				elseif
 					model
 					and not root.Anchored
@@ -22314,30 +23216,18 @@ do
 					if danger then
 						Home.hide(session, danger, generation)
 					end
-				elseif
-					cameraState
-					and cameraState ~= "normal"
-					and events
-					and type(events.fire) == "function"
-					and tasks
-					and tasks.watcher == false
-				then
-					status(title, "Working on the Watcher task", count / 4)
-					pcall(events.fire, "click")
-				elseif model and not root.Anchored then
-					local target = Home.choose(session, root, tasks, visitor)
-					if target then
-						status(title, target.prompt.ActionText .. " " .. target.prompt.ObjectText, count / 4)
-						Home.interact(session, target, generation)
-					else
-						status(title, "Waiting for the next visitor or event task", count / 4)
+				else
+					local why
+					delay, why = Home.step(session, tasks, visitor, generation)
+					if not delay then
+						return false, why
 					end
 				end
 			end
 			if os.clock() - session.progressAt > 600 then
 				return false, "Progress hasn't changed for a while. Check the current task, then try Start again."
 			end
-			if not pause(0.35, generation) then
+			if not pause(delay, generation) then
 				break
 			end
 		end
@@ -22450,10 +23340,15 @@ do
 	end
 	function ArcadeGuide.choices(state, entries, carrying)
 		local choices = {}
+		local retry = {}
 		for _, entry in ipairs(entries) do
 			if entry.generator == carrying and entry.usable then
-				choices[#choices + 1] = entry
+				local list = state.rejected and (state.rejected[entry.object] or 0) > os.clock() and retry or choices
+				list[#list + 1] = entry
 			end
+		end
+		if #choices == 0 then
+			choices = retry
 		end
 		table.sort(choices, function(a, b)
 			return a.distance < b.distance
@@ -22558,20 +23453,39 @@ do
 			end
 		end
 	end
-	function ArcadeGuide.floor(state, point, target)
+	function ArcadeGuide.params(state, target)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
-		local ignore = { state.folder }
-		if App.player.Character then
-			ignore[#ignore + 1] = App.player.Character
+		if not state.rayIgnore or os.clock() >= (state.rayAt or 0) or state.rayModel ~= App.player.Character then
+			local ignore = { state.folder }
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player.Character then
+					ignore[#ignore + 1] = player.Character
+				end
+			end
+			local dress = getPath(workspace, "Maze", "Corn", "CornDress")
+			if dress then
+				ignore[#ignore + 1] = dress
+			end
+			state.rayIgnore, state.rayAt, state.rayModel = ignore, os.clock() + 0.5, App.player.Character
+			local _, root = character()
+			state.rayGroup = root and root.CollisionGroup
 		end
+		local ignore = table.clone(state.rayIgnore)
 		if target then
 			ignore[#ignore + 1] = target
 		end
 		params.FilterDescendantsInstances, params.IgnoreWater = ignore, true
 		pcall(function()
 			params.RespectCanCollide = true
+			if state.rayGroup then
+				params.CollisionGroup = state.rayGroup
+			end
 		end)
+		return params, ignore
+	end
+	function ArcadeGuide.floor(state, point, target)
+		local params, ignore = ArcadeGuide.params(state, target)
 		for _ = 1, 6 do
 			local hit = workspace:Raycast(point + Vector3.new(0, 5, 0), Vector3.new(0, -24, 0), params)
 			if not hit then
@@ -22636,13 +23550,156 @@ do
 		return route.index or 1, closest and closest.distance or math.huge, false
 	end
 	function ArcadeGuide.sight(state, root, entry, point)
-		local params = RaycastParams.new()
-		params.FilterType, params.FilterDescendantsInstances =
-			Enum.RaycastFilterType.Exclude, { state.folder, App.player.Character, entry.object }
-		pcall(function()
-			params.RespectCanCollide = true
-		end)
+		local params = ArcadeGuide.params(state, entry.object)
 		return not workspace:Raycast(root.Position, point + Vector3.new(0, 3, 0) - root.Position, params)
+	end
+	function ArcadeGuide.passage(state, from, to, entry)
+		if math.abs(from.Y - to.Y) > 2 then
+			return false
+		end
+		local middle = ArcadeGuide.floor(state, (from + to) * 0.5, entry.object)
+		if not middle or math.abs(middle.Y - (from.Y + to.Y) * 0.5) > 2 then
+			return false
+		end
+		local delta = to - from
+		local flat = Vector3.new(delta.X, 0, delta.Z)
+		if flat.Magnitude < 0.1 then
+			return true
+		end
+		local side = Vector3.new(-flat.Z, 0, flat.X).Unit
+		local params = ArcadeGuide.params(state, entry.object)
+		for _, offset in ipairs({
+			Vector3.new(0, 1.2, 0),
+			Vector3.new(0, 3, 0),
+			side + Vector3.new(0, 2.2, 0),
+			side * -1 + Vector3.new(0, 2.2, 0),
+		}) do
+			if workspace:Raycast(from + offset, delta, params) then
+				return false
+			end
+		end
+		return true
+	end
+	function ArcadeGuide.grid(state, entry, origin, valid)
+		local from = ArcadeGuide.floor(state, origin, entry.object)
+		local goal = ArcadeGuide.floor(state, entry.body.Position, entry.object)
+		if not from or not goal then
+			return nil
+		end
+		local cells, heap = {}, {}
+		local step, reach = 4, math.clamp((entry.prompt and entry.prompt.MaxActivationDistance or 10) * 0.5, 3, 6)
+		local gx, gz = (goal.X - from.X) / step, (goal.Z - from.Z) / step
+		local margin = math.min(72, 24 + (state.planFailures or 0) * 16)
+		local minX, maxX = math.floor(math.min(0, gx)) - margin, math.ceil(math.max(0, gx)) + margin
+		local minZ, maxZ = math.floor(math.min(0, gz)) - margin, math.ceil(math.max(0, gz)) + margin
+		local function push(node)
+			local value = {
+				node = node,
+				cost = node.cost,
+				score = node.cost + math.abs(node.point.X - goal.X) + math.abs(node.point.Z - goal.Z),
+			}
+			local i = #heap + 1
+			while i > 1 and heap[math.floor(i / 2)].score > value.score do
+				heap[i] = heap[math.floor(i / 2)]
+				i = math.floor(i / 2)
+			end
+			heap[i] = value
+		end
+		local function pop()
+			local first = heap[1]
+			local last = table.remove(heap)
+			if #heap > 0 then
+				local i = 1
+				while i * 2 <= #heap do
+					local child = i * 2
+					if child < #heap and heap[child + 1].score < heap[child].score then
+						child += 1
+					end
+					if heap[child].score >= last.score then
+						break
+					end
+					heap[i], i = heap[child], child
+				end
+				heap[i] = last
+			end
+			return first
+		end
+		local start = { x = 0, z = 0, point = from, cost = 0 }
+		cells["0:0"] = start
+		push(start)
+		local count, deadline, sliceAt = 0, os.clock() + 4, os.clock()
+		local directions = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+		while #heap > 0 and count < 4096 and os.clock() < deadline do
+			if not valid() then
+				return nil
+			end
+			local record = pop()
+			local node = record.node
+			if node.closed or record.cost ~= node.cost then
+				continue
+			end
+			node.closed = true
+			count += 1
+			local delta = node.point - goal
+			if
+				Vector3.new(delta.X, 0, delta.Z).Magnitude <= reach
+				and ArcadeGuide.passage(state, node.point, goal, entry)
+			then
+				local chain, points = {}, {}
+				while node do
+					chain[#chain + 1] = node.point
+					node = node.parent
+				end
+				for i = #chain, 1, -1 do
+					local point = chain[i]
+					local length = #points
+					if
+						length >= 2
+						and (points[length].Position - points[length - 1].Position):Cross(
+								point - points[length].Position
+							).Magnitude
+							< 0.01
+					then
+						points[length] = { Position = point }
+					else
+						points[length + 1] = { Position = point }
+					end
+				end
+				return #points > 1 and points or nil
+			end
+			for _, direction in ipairs(directions) do
+				local x, z = node.x + direction[1], node.z + direction[2]
+				if x < minX or x > maxX or z < minZ or z > maxZ then
+					continue
+				end
+				local key = x .. ":" .. z
+				local nextNode = cells[key]
+				if nextNode == nil then
+					local ground = ArcadeGuide.floor(
+						state,
+						Vector3.new(from.X + x * step, node.point.Y, from.Z + z * step),
+						entry.object
+					)
+					nextNode = ground and { x = x, z = z, point = ground, cost = math.huge } or false
+					cells[key] = nextNode
+				end
+				local cost = node.cost + step
+				if
+					nextNode
+					and not nextNode.closed
+					and cost < nextNode.cost
+					and ArcadeGuide.passage(state, node.point, nextNode.point, entry)
+				then
+					nextNode.cost, nextNode.parent = cost, node
+					push(nextNode)
+				end
+			end
+			if count % 24 == 0 or os.clock() - sliceAt >= 0.003 then
+				task.wait(0.01)
+				sliceAt = os.clock()
+			end
+		end
+		return nil
 	end
 	function ArcadeGuide.paint(state, entry, samples, start, blockedAt)
 		local painted = 0
@@ -22752,13 +23809,30 @@ do
 		if route.detached then
 			return false
 		end
+		if route.grid and os.clock() >= (route.checkAt or 0) then
+			route.checkAt = os.clock() + 0.5
+			for index = start + 1, math.min(start + 4, #route.samples) do
+				if
+					not ArcadeGuide.passage(
+						state,
+						route.samples[index - 1].point,
+						route.samples[index].point,
+						route.target
+					)
+				then
+					route.detached = true
+					state.planAt = 0
+					return false
+				end
+			end
+		end
 		route.waypoint = route.samples[start] and route.samples[start].waypoint or route.waypoint
 		return ArcadeGuide.paint(state, route.target, route.samples, start, route.blockedAt)
 	end
 	function ArcadeGuide.direct(state, root, entry, model, carrying, match)
 		local from = ArcadeGuide.floor(state, root.Position, entry.object)
 		local to = ArcadeGuide.floor(state, entry.body.Position, entry.object)
-		if not from or not to or (to - from).Magnitude > 90 or not ArcadeGuide.sight(state, root, entry, to) then
+		if not from or not to or (to - from).Magnitude > 90 or not ArcadeGuide.passage(state, from, to, entry) then
 			return nil
 		end
 		local points = { { Position = from }, { Position = to } }
@@ -22785,12 +23859,13 @@ do
 		}
 	end
 	function ArcadeGuide.plan(state, choices, model, root, carrying, match)
-		if state.busy or (state.requests or 0) >= 3 or #choices == 0 then
+		if state.busy or (state.requests or 0) >= 4 or #choices == 0 then
 			return
 		end
 		local entry = choices[1]
 		local epoch, origin = state.epoch, root.Position
-		local request = {}
+		local useGrid = state.forceGrid or (state.requests or 0) >= 3
+		local request = { started = os.clock(), kind = useGrid and "grid" or "native" }
 		state.busy = request
 		state.requests = (state.requests or 0) + 1
 		local function valid()
@@ -22813,7 +23888,7 @@ do
 		task.spawn(function()
 			local candidate, result
 			local ok = pcall(function()
-				if not valid() then
+				if not valid() or useGrid then
 					return
 				end
 				local paths = game:GetService("PathfindingService")
@@ -22864,6 +23939,24 @@ do
 			if candidate then
 				pcall(candidate.Destroy, candidate)
 			end
+			if valid() and not result then
+				request.kind, state.forceGrid = "grid", true
+				ok = pcall(function()
+					local points = ArcadeGuide.grid(state, entry, origin, valid)
+					if points then
+						result = {
+							grid = true,
+							points = points,
+							samples = ArcadeGuide.samples(points),
+							index = 1,
+							target = entry,
+							carrying = carrying,
+							model = model,
+							match = match,
+						}
+					end
+				end)
+			end
 			if state.busy == request then
 				state.busy = nil
 			end
@@ -22872,14 +23965,20 @@ do
 			if not ok or not valid() or not result or #result.samples == 0 then
 				ArcadeGuide.dispose(result)
 				if valid() then
-					state.planAt = os.clock() + 0.75
+					state.planFailures = (state.planFailures or 0) + 1
+					state.planAt = os.clock() + 1
+					if state.planFailures >= 2 and (not state.route or state.route.detached) then
+						state.rejected = state.rejected or setmetatable({}, { __mode = "k" })
+						state.rejected[entry.object] = os.clock() + 8
+					end
 				end
 				return
 			end
 			ArcadeGuide.dispose(state.route)
 			state.route = result
+			state.planFailures = 0
 			state.planAt = os.clock() + 0.5
-			if result.path.Blocked then
+			if result.path and result.path.Blocked then
 				result.connection = result.path.Blocked:Connect(function(index)
 					if ArcadeGuide.current(state) and state.route == result and index >= (result.waypoint or 1) then
 						result.blockedAt = math.min(result.blockedAt or math.huge, index)
@@ -22891,6 +23990,14 @@ do
 	end
 	function ArcadeGuide.tick(state)
 		ArcadeGuide.inventory(state)
+		local request = state.busy
+		if request and request.kind == "native" and os.clock() - request.started >= 2 then
+			request.cancelled = true
+			if request.path then
+				pcall(request.path.Destroy, request.path)
+			end
+			state.busy, state.forceGrid, state.planAt = nil, true, 0
+		end
 		local match = Storage:FindFirstChild("ArcadeMatch")
 		local model, root = character()
 		if
@@ -22937,6 +24044,7 @@ do
 		if changed then
 			ArcadeGuide.clearRoute(state)
 			state.planAt, state.directAt = 0, 0
+			state.planFailures = 0
 		end
 		state.target, state.carrying, state.model, state.match = target, carrying, model, match
 		if not App.arcadeArrows then
@@ -22991,7 +24099,9 @@ do
 					carrying and "AMBER" or "CYAN",
 					name,
 					target.distance,
-					walking and "Follow the maze floor." or "Follow the arrow by your feet while the route loads."
+					walking and "Follow the arrows through the maze."
+						or (state.planFailures or 0) > 0 and "Checking another way around."
+						or "Finding a path through the maze..."
 				)
 		)
 	end
