@@ -7,7 +7,27 @@ Logic.games = {
 		id = "hollow",
 		name = "The Hollow",
 		place = 116463962153167,
-		objective = "Clear floors 1-6 and bring the relic back",
+		objective = "Clear floors 1-7 and bring the relic back",
+	},
+	{
+		id = "shawarma",
+		name = "Scary Shawarma Kiosk",
+		place = 137826330724902,
+		travelPlace = 137826330724902,
+		eventPlace = 128001665358186,
+		alternatePlaces = { 128001665358186 },
+		universe = 8539298853,
+		badges = { 2744322318805759 },
+		objective = "Vote for The Hollow in Story Mode and seal the breach",
+	},
+	{
+		id = "banana",
+		name = "Banana Eats",
+		place = 4448566543,
+		alternatePlaces = { 105438027287525 },
+		universe = 1415710834,
+		badges = { 3280908596375106 },
+		objective = "Find the Hollow key, survive Banana and enter the red door",
 	},
 	{
 		id = "hospital",
@@ -31,11 +51,13 @@ Logic.games = {
 			15642275269,
 			89606894431558,
 			137041148301025,
+			114053697102355,
 		},
 		questPlace = 137041148301025,
+		chapterPlace = 114053697102355,
 		universe = 5203828273,
 		badges = { 3237413882062240 },
-		objective = "Finish Dark King Chapter 1. Auto entry only for now.",
+		objective = "Cross the river, gather fuel and finish Dark King Chapter 1",
 	},
 	{
 		id = "mimic",
@@ -3100,8 +3122,8 @@ local function runHollow(generation)
 		floor = maze
 		App.floor = floor
 	end
-	if floor ~= 1 and floor ~= 2 and floor ~= 3 and floor ~= 4 and floor ~= 5 and floor ~= 6 then
-		return false, "Choose a floor from 1 to 6: pipes, pillars, graves, bridge, mirrors or witch's brew"
+	if floor ~= 1 and floor ~= 2 and floor ~= 3 and floor ~= 4 and floor ~= 5 and floor ~= 6 and floor ~= 7 then
+		return false, "Choose a floor from 1 to 7"
 	end
 	local loaded = waitUntil(function()
 		return App.player:FindFirstChild("Loaded")
@@ -3112,6 +3134,7 @@ local function runHollow(generation)
 	local completed = floor == 4 and Bridge.completed()
 		or floor == 5 and Bridge.mirrorsCompleted()
 		or floor == 6 and Bridge.brewCompleted()
+		or floor == 7 and Bridge.lanternsCompleted()
 	if completed and not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true then
 		return true, "Floor " .. floor .. " has already been completed"
 	end
@@ -3153,7 +3176,14 @@ local function runHollow(generation)
 	if not pause(2, generation) then
 		return false, "Stopped"
 	end
-	if floor == 6 then
+	if floor == 7 then
+		if not completed and App.player:GetAttribute("HasRelic") ~= true then
+			local solved, solveError = Bridge.solveLanterns(objects, clientState, generation)
+			if not solved then
+				return false, solveError
+			end
+		end
+	elseif floor == 6 then
 		if not completed and App.player:GetAttribute("HasRelic") ~= true then
 			local solved, solveError = Bridge.solveBrew(objects, clientState, generation)
 			if not solved then
@@ -3326,12 +3356,13 @@ local function runHollow(generation)
 		return false, returnError
 	end
 	if
-		(floor == 4 or floor == 5 or floor == 6)
+		(floor == 4 or floor == 5 or floor == 6 or floor == 7)
 		and not waitUntil(function()
 			return (
 				floor == 4 and Bridge.completed()
 				or floor == 5 and Bridge.mirrorsCompleted()
 				or floor == 6 and Bridge.brewCompleted()
+				or floor == 7 and Bridge.lanternsCompleted()
 			)
 				and not App.player:GetAttribute("InMaze")
 				and App.player:GetAttribute("HasRelic") ~= true
@@ -20629,12 +20660,608 @@ do
 end
 do
 	local Dti = {}
-	function Dti.run(generation)
-		if verify(current) == true then
-			return true, "DTI's Hollow badge is already earned"
+	function Dti.remote(name)
+		return getPath(Storage, "RemoteEvents", name)
+	end
+	function Dti.point(value)
+		if typeof(value) == "CFrame" then
+			return value.Position
+		elseif typeof(value) == "Vector3" then
+			return value
+		elseif typeof(value) == "Instance" then
+			return EventInput.point(value)
 		end
+		return nil
+	end
+	function Dti.visible(object)
+		if not object then
+			return false
+		end
+		local parent = object
+		while parent do
+			if parent:IsA("GuiObject") and not parent.Visible or parent:IsA("ScreenGui") and not parent.Enabled then
+				return false
+			end
+			parent = parent.Parent
+		end
+		return true
+	end
+	function Dti.boat()
+		return getPath(workspace, "Chapter 1", "RiverOfStyx", "boat")
+	end
+	function Dti.ready(session, generation)
+		local model, root, humanoid = character()
+		local camera = workspace.CurrentCamera
+		local cover = getPath(App.player, "PlayerGui", "QuestBlackout", "Frame")
+		return active(generation)
+			and not session.closed
+			and model == session.model
+			and root
+			and not root.Anchored
+			and humanoid.Health > 0
+			and not App.cameraBusy
+			and not (camera and camera.CameraType == Enum.CameraType.Scriptable)
+			and not (Dti.visible(cover) and cover.BackgroundTransparency < 0.1)
+	end
+	function Dti.release(session)
+		EventInput.release(session)
+		if session.soulHolding then
+			fire(Dti.remote("HoldSoulPrompt"), session.soulHolding, false)
+			session.soulHolding = nil
+		end
+	end
+	function Dti.clear(session)
+		if session.closed then
+			return
+		end
+		session.closed = true
+		for _, connection in pairs(session.bound) do
+			pcall(connection.Disconnect, connection)
+		end
+		table.clear(session.bound)
+		Dti.release(session)
+	end
+	function Dti.receive(session, name, a, b, c)
+		if name == "HoldingFuel" and type(a) == "boolean" then
+			session.holding = a
+		elseif name == "UpdateCurrentFuel" and type(a) == "number" then
+			session.fuel = a
+			session.maxFuel = math.max(session.maxFuel or 0, a)
+		elseif name == "UpdateCurrentFuelStorage" and type(a) == "number" then
+			session.storage = a
+		elseif name == "UpdateDistance" then
+			session.sailing = type(a) == "number"
+			if type(a) == "number" and a ~= session.distance then
+				session.distance, session.distanceGoal = a, b
+				session.progressAt = os.clock()
+			end
+		elseif name == "UpdateCollectedOrbs" then
+			session.collecting = type(a) == "number"
+			if type(a) == "number" then
+				if a ~= session.orbs then
+					session.progressAt = os.clock()
+				end
+				session.orbs, session.orbGoal = a, b
+			end
+		elseif name == "CollectedOrb" then
+			if a then
+				session.collected[a] = true
+			end
+			session.progressAt = os.clock()
+		elseif name == "GuidePath" then
+			session.guideObserved = true
+			session.guide, session.guideIndex = {}, 1
+			if type(a) == "table" then
+				for _, value in ipairs(a) do
+					local point = Dti.point(value)
+					if point then
+						table.insert(session.guide, point)
+					end
+					if #session.guide >= 256 then
+						break
+					end
+				end
+			end
+			session.progressAt = os.clock()
+		elseif name == "BoatEndSequence" then
+			session.boatEnded = true
+			session.progressAt = os.clock()
+		elseif name == "EndBoatEndSequence" then
+			session.boatEnded = true
+			session.progressAt = os.clock()
+		elseif name == "EndSistersScene" then
+			session.sistersEnded = true
+			session.progressAt = os.clock()
+		elseif name == "StartSistersScene" then
+			session.sistersStarted = true
+			session.progressAt = os.clock()
+		elseif name == "QuestBlackout" then
+			Dti.release(session)
+			session.progressAt = os.clock()
+		elseif name == "SoulWhacked" then
+			if a then
+				session.whacked[a] = os.clock()
+			end
+			session.progressAt = os.clock()
+		elseif name == "MoveBoat" then
+			local point = Dti.point(b)
+			if point and (not session.boatPoint or (point - session.boatPoint).Magnitude > 2) then
+				session.boatPoint, session.progressAt = point, os.clock()
+			end
+		end
+	end
+	function Dti.bind(session, generation)
+		if os.clock() < (session.bindAt or 0) then
+			return
+		end
+		session.bindAt = os.clock() + 1
+		for _, name in ipairs({
+			"HoldingFuel",
+			"UpdateCurrentFuel",
+			"UpdateCurrentFuelStorage",
+			"UpdateDistance",
+			"UpdateCollectedOrbs",
+			"CollectedOrb",
+			"GuidePath",
+			"BoatEndSequence",
+			"EndBoatEndSequence",
+			"StartSistersScene",
+			"EndSistersScene",
+			"QuestBlackout",
+			"SoulWhacked",
+			"MoveBoat",
+		}) do
+			local remote = Dti.remote(name)
+			local prior = session.remotes[name]
+			if prior ~= remote then
+				if prior and session.bound[prior] then
+					session.bound[prior]:Disconnect()
+					session.bound[prior] = nil
+				end
+				session.remotes[name] = remote
+			end
+			if
+				remote
+				and not session.bound[remote]
+				and (remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent"))
+			then
+				session.bound[remote] = remote.OnClientEvent:Connect(function(...)
+					if active(generation) and not session.closed then
+						local ok, why = pcall(Dti.receive, session, name, ...)
+						if not ok then
+							session.note = tostring(why):sub(1, 150)
+						end
+					end
+				end)
+			end
+		end
+	end
+	function Dti.read(session)
+		local gui = App.player:FindFirstChild("PlayerGui")
+		for _, row in ipairs({ { "DistanceLabel", "distance", "distanceGoal" }, { "OrbsLabel", "orbs", "orbGoal" } }) do
+			local label = getPath(gui, "BoatGui", row[1])
+			if Dti.visible(label) and label:IsA("TextLabel") then
+				local amount, goal = label.Text:match("(%d+)%s*/%s*(%d+)")
+				amount, goal = tonumber(amount), tonumber(goal)
+				if amount and goal and goal > 0 then
+					if session[row[2]] ~= amount then
+						session.progressAt = os.clock()
+					end
+					session[row[2]], session[row[3]] = amount, goal
+					if row[2] == "orbs" then
+						session.collecting = true
+					end
+				end
+			end
+		end
+		if os.clock() >= (session.holdingAt or 0) then
+			session.holdingAt = os.clock() + 2
+			local query = getPath(App.player, "PlayerScripts", "QuestEvents", "IsHoldingFuel")
+			if query and query:IsA("BindableFunction") then
+				local ok, value = call(query, function()
+					return query:Invoke()
+				end, 0.5, session.generation)
+				if ok and type(value) == "boolean" then
+					session.holding = value
+				end
+			end
+		end
+	end
+	function Dti.skip(session)
+		if os.clock() < (session.skipAt or 0) then
+			return
+		end
+		local gui = App.player:FindFirstChild("PlayerGui")
+		local dialogue = getPath(gui, "Dialogue2", "SkipLabel")
+		if Dti.visible(dialogue) and dialogue.Text:lower():find("vote skip", 1, true) then
+			if fire(Dti.remote("SkipSimpleDialogue")) then
+				session.skipAt = os.clock() + 2
+			end
+		end
+		local skip = getPath(gui, "Dialog", "SkipButton")
+		if Dti.visible(skip) and skip:IsA("GuiButton") then
+			if fire(Dti.remote("Skip_Cutscene_Remote")) then
+				session.skipAt = os.clock() + 2
+			end
+		end
+	end
+	function Dti.move(session, point, generation, boat, allowed, ignore)
+		local model, root, humanoid = character()
+		local function ready()
+			return Dti.ready(session, generation) and App.player.Character == model and (not allowed or allowed())
+		end
+		if typeof(point) ~= "Vector3" or not ready() or point.Y <= workspace.FallenPartsDestroyHeight + 40 then
+			return false
+		end
+		if (point - root.Position).Magnitude > 70 and os.clock() >= (session.streamAt or 0) then
+			session.streamAt = os.clock() + 2
+			call("DTI stream", function()
+				App.player:RequestStreamAroundAsync(point, 1)
+			end, 0.6, generation)
+		end
+		if not ready() or boat and not boat:IsDescendantOf(workspace) then
+			return false
+		end
+		local params = RaycastParams.new()
+		params.FilterType = boat and Enum.RaycastFilterType.Include or Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = boat and { boat } or (ignore and { model, ignore } or { model })
+		params.RespectCanCollide, params.IgnoreWater = true, true
+		local hit = workspace:Raycast(point + Vector3.new(0, 6, 0), Vector3.new(0, -38, 0), params)
+		if not hit or hit.Normal.Y < 0.6 or hit.Position.Y <= workspace.FallenPartsDestroyHeight + 40 then
+			return false
+		end
+		local destination = hit.Position + Vector3.new(0, math.max(2.6, humanoid.HipHeight + root.Size.Y / 2), 0)
+		if not ready() or (destination - point).Magnitude > 24 then
+			return false
+		end
+		if (destination - root.Position).Magnitude > 1.5 then
+			root.AssemblyLinearVelocity, root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+			local target = CFrame.new(destination) * root.CFrame.Rotation
+			model:PivotTo(target * root.CFrame:ToObjectSpace(model:GetPivot()))
+		end
+		return pause(0.1, generation) and ready()
+	end
+	function Dti.prompts(tag)
+		local out = {}
+		for _, object in ipairs(Collection:GetTagged(tag)) do
+			if object:IsA("ProximityPrompt") and object.Enabled and object:IsDescendantOf(workspace) then
+				table.insert(out, object)
+			end
+		end
+		return out
+	end
+	function Dti.use(session, prompt, role, generation, soul)
+		if os.clock() < (session.retry[prompt] or 0) then
+			return false
+		end
+		local point = EventInput.point(prompt.Parent)
+		local occupied = soul and soul:GetAttribute("Occupied")
+		local holding, fuel = session.holding, session.fuel
+		local started = os.clock()
+		local function allowed()
+			return Dti.ready(session, generation)
+				and prompt:IsDescendantOf(workspace)
+				and prompt.Enabled
+				and (not soul or soul:GetAttribute("Occupied") == occupied)
+		end
+		local function accepted()
+			if not prompt.Parent or not prompt.Enabled then
+				return true
+			end
+			if role == "soul" then
+				return soul:GetAttribute("Occupied") ~= occupied or (session.whacked[soul] or -1) > started
+			end
+			if role == "take" then
+				return session.holding == true and holding ~= true
+			end
+			return session.holding == false and holding ~= false or session.fuel and fuel and session.fuel > fuel
+		end
+		local _, root = character()
+		if not point or not root or not allowed() then
+			return false
+		end
+		if (root.Position - point).Magnitude > math.max(2, prompt.MaxActivationDistance - 1) then
+			local boat = Dti.boat()
+			local spawn = boat and boat:FindFirstChild("SpawnAtt")
+			local center = spawn and EventInput.point(spawn)
+			local destination = point
+			if center then
+				local inside = Vector3.new(center.X - point.X, 0, center.Z - point.Z)
+				if inside.Magnitude > 0.1 then
+					destination += inside.Unit * math.min(2.5, prompt.MaxActivationDistance * 0.4, inside.Magnitude)
+				end
+			end
+			if not Dti.move(session, destination, generation, boat, allowed) then
+				return false
+			end
+		end
+		session.retry[prompt] = started + 1
+		session.soulHolding = soul
+		EventInput.hold(session, prompt, generation, allowed)
+		session.soulHolding = nil
+		local confirmed = waitUntil(function()
+			return accepted() or not Dti.ready(session, generation)
+		end, 1.2, generation)
+		if confirmed and Dti.ready(session, generation) then
+			session.progressAt = os.clock()
+			return true
+		end
+		if not allowed() then
+			return false
+		end
+		if type(fireproximityprompt) == "function" then
+			session.soulHolding = soul
+			call(prompt, function()
+				if allowed() then
+					return fireproximityprompt(prompt, prompt.HoldDuration)
+				end
+				return false
+			end, prompt.HoldDuration + 1, generation)
+			session.soulHolding = nil
+			if waitUntil(accepted, 1, generation) then
+				session.progressAt = os.clock()
+				return true
+			end
+		end
+		session.retry[prompt] = os.clock() + 2
+		return false
+	end
+	function Dti.orb(session)
+		local _, root = character()
+		local best, distance
+		for _, object in ipairs(Collection:GetTagged("SpawnedOrb")) do
+			if
+				object:IsA("BasePart")
+				and object:IsDescendantOf(workspace)
+				and not session.collected[object]
+				and os.clock() >= (session.retry[object] or 0)
+				and root
+			then
+				local range = (object.Position - root.Position).Magnitude
+				if not distance or range < distance then
+					best, distance = object, range
+				end
+			end
+		end
+		return best
+	end
+	function Dti.collect(session, generation, orb)
+		status(
+			"Gathering lantern fuel",
+			string.format("%d / %d fuel orbs", session.orbs or 0, session.orbGoal or 10),
+			0.25
+		)
+		if orb then
+			local before = session.orbs
+			local function available()
+				return orb:IsDescendantOf(workspace)
+					and not session.collected[orb]
+					and session.collecting ~= false
+					and not session.boatEnded
+			end
+			if Dti.move(session, orb.Position, generation, nil, available, orb) then
+				local credited = waitUntil(function()
+					return not available() or session.orbs ~= before
+				end, 1.5, generation)
+				if credited then
+					session.progressAt = os.clock()
+				else
+					session.retry[orb] = os.clock() + 2
+				end
+			else
+				session.retry[orb] = os.clock() + 1
+			end
+			return
+		end
+		local spawns = getPath(workspace, "Chapter 1", "Refuel1", "PotentialOrbSpawns")
+		local _, root = character()
+		local best, cost
+		for _, spawn in ipairs(spawns and spawns:GetChildren() or {}) do
+			local point = EventInput.point(spawn)
+			if point and root then
+				local score = (point - root.Position).Magnitude + (session.explored[spawn] and 10000 or 0)
+				if not cost or score < cost then
+					best, cost = spawn, score
+				end
+			end
+		end
+		if best and os.clock() >= (session.exploreAt or 0) then
+			session.exploreAt = os.clock() + 1
+			if cost >= 10000 then
+				table.clear(session.explored)
+			end
+			if Dti.move(session, EventInput.point(best), generation) then
+				session.explored[best] = true
+			end
+		end
+	end
+	function Dti.board(session, generation)
+		local boat = Dti.boat()
+		local spawn = boat and (boat:FindFirstChild("SpawnAtt") or boat:FindFirstChild("SpawnLocation"))
+		local point = spawn and EventInput.point(spawn)
+		local _, root = character()
+		if not point or not root then
+			return false
+		end
+		local params = RaycastParams.new()
+		params.FilterType, params.FilterDescendantsInstances = Enum.RaycastFilterType.Include, { boat }
+		params.RespectCanCollide = true
+		local floor = workspace:Raycast(root.Position, Vector3.new(0, -8, 0), params)
+		if floor and (root.Position - point).Magnitude < 22 then
+			return true
+		end
+		return Dti.move(session, point, generation, boat)
+	end
+	function Dti.follow(session, generation)
+		local _, root = character()
+		if session.boatEnded and not session.guideObserved and not session.guide then
+			local folder = getPath(workspace, "SoulField", "GuideNodes")
+			local nodes = {}
+			for _, object in ipairs(folder and folder:GetChildren() or {}) do
+				local order = tonumber(object.Name:match("^Node(%d+)$"))
+				local point = EventInput.point(object)
+				if order and point then
+					table.insert(nodes, { order = order, point = point })
+				end
+			end
+			table.sort(nodes, function(a, b)
+				return a.order < b.order
+			end)
+			if #nodes > 0 and root then
+				local closest, distance = 1, math.huge
+				session.guide = {}
+				for i, item in ipairs(nodes) do
+					table.insert(session.guide, item.point)
+					local range = (root.Position - item.point).Magnitude
+					if range < distance then
+						closest, distance = i, range
+					end
+				end
+				session.guideIndex = closest
+			end
+		end
+		local guide = session.guide
+		local index = session.guideIndex or 1
+		local point = guide and guide[index]
+		if point and root then
+			status("Following the lantern path", string.format("Path %d / %d", index, #guide), 0.8)
+			if (point - root.Position).Magnitude < 10 then
+				session.guideIndex, session.progressAt = index + 1, os.clock()
+			else
+				Dti.move(session, point, generation, nil, function()
+					return session.guide == guide
+				end)
+			end
+			return true
+		end
+		if not session.boatEnded then
+			return false
+		end
+		if session.sistersStarted then
+			status("The sisters", "Waiting for the chapter reward", 0.95)
+			return true
+		end
+		local trigger = getPath(workspace, "SistersInteraction", "MoraiCutsceneTrigger")
+		if trigger and trigger:IsA("BasePart") then
+			status("Reaching the sisters", "Following the path to the chapter ending", 0.9)
+			if os.clock() >= (session.endingAt or 0) then
+				session.endingAt = os.clock() + 2
+				Dti.move(session, trigger.Position, generation)
+			end
+		else
+			status("Following the lantern path", "Waiting for the next part of the path", 0.8)
+		end
+		return true
+	end
+	function Dti.step(session, generation)
+		Dti.bind(session, generation)
+		local model = character()
+		if model ~= session.model then
+			Dti.release(session)
+			session.model, session.holding, session.holdingAt = model, nil, 0
+			session.retry = setmetatable({}, { __mode = "k" })
+		end
+		Dti.read(session)
+		Dti.skip(session)
+		if not model then
+			status("Dark King Chapter 1", "Revive or rejoin to keep going", App.progress)
+			return
+		end
+		if workspace:GetAttribute("Started") == false then
+			status("Dark King Chapter 1", "Waiting for the other players", 0)
+			return
+		end
+		if not Dti.ready(session, generation) then
+			Dti.release(session)
+			status("Dark King Chapter 1", "Waiting for the scene to finish", App.progress)
+			return
+		end
+		if session.sistersEnded then
+			status("Chapter 1 finished", "Waiting for the saved badge", 0.98)
+			return
+		end
+		local orb = Dti.orb(session)
+		if
+			orb and session.collecting ~= false
+			or session.collecting and (session.orbs or 0) < (session.orbGoal or 10)
+		then
+			Dti.collect(session, generation, orb)
+			return
+		end
+		if Dti.follow(session, generation) then
+			return
+		end
+		local lantern, fuel = Dti.prompts("LanternPrompt")[1], Dti.prompts("FuelPrompt")[1]
+		if session.holding == true or lantern and session.holding == nil then
+			status("Feeding the lantern", "Adding the fuel orb", 0.4)
+			if lantern then
+				Dti.use(session, lantern, "add", generation)
+			else
+				Dti.board(session, generation)
+			end
+			return
+		end
+		local soul, prompt, deadline
+		for _, attachment in ipairs(Collection:GetTagged("SoulAtt")) do
+			local occupied = attachment:GetAttribute("Occupied")
+			local interaction = attachment:FindFirstChildWhichIsA("ProximityPrompt")
+			if
+				type(occupied) == "number"
+				and interaction
+				and interaction.Enabled
+				and attachment:IsDescendantOf(workspace)
+				and os.clock() >= (session.retry[interaction] or 0)
+				and (not deadline or occupied < deadline)
+			then
+				soul, prompt, deadline = attachment, interaction, occupied
+			end
+		end
+		if prompt then
+			status("Clearing a soul", "Keeping it away from the boat", 0.45)
+			Dti.use(session, prompt, "soul", generation, soul)
+			return
+		end
+		local lowFuel = session.fuel and session.fuel <= (session.maxFuel or session.fuel) * 0.35
+		local unknownFuel = session.fuel == nil and os.clock() >= (session.fuelTryAt or 0)
+		if fuel and session.storage ~= 0 and (lowFuel or unknownFuel) then
+			session.fuelTryAt = os.clock() + 12
+			status("Picking up lantern fuel", "Getting an orb from the boat", 0.35)
+			Dti.use(session, fuel, "take", generation)
+			return
+		end
+		local boat = Dti.boat()
+		local finish = getPath(workspace, "Chapter 1", "RiverOfStyx", "FinalBoatCF")
+		local boatPoint, finishPoint = boat and EventInput.point(boat), finish and EventInput.point(finish)
+		if boatPoint and finishPoint and (boatPoint - finishPoint).Magnitude < 20 then
+			session.boatEnded = true
+			Dti.follow(session, generation)
+			return
+		end
+		local aboard = Dti.board(session, generation)
+		status(
+			aboard and "Crossing the river" or "Boarding the boat",
+			session.distance
+					and string.format(
+						"%.0f / %.0f traveled",
+						session.distance,
+						session.distanceGoal or session.distance
+					)
+				or "Staying with the Ferryman",
+			0.15
+		)
+	end
+	function Dti.enter(generation)
 		if game.PlaceId == current.questPlace then
-			return false, "You're in the Dark King quest. Play Chapter 1 yourself for now."
+			status("Joining Chapter 1", "Joining the river quest", 0.05)
+			prepareTravel(current.chapterPlace, true)
+			local ok, why = pcall(function()
+				Teleport:Teleport(current.chapterPlace, App.player)
+			end)
+			if not ok then
+				return false, "Couldn't join Chapter 1. Use its elevator, then press Start inside."
+			end
+			pause(20, generation)
+			return false, "Try the Chapter 1 elevator if you haven't joined yet."
 		end
 		status("Entering the Dark King quest", "Finding the H26 quest portal", 0.1)
 		local portal = waitUntil(function()
@@ -20657,14 +21284,56 @@ do
 		if not active(generation) or not portal:IsDescendantOf(workspace) then
 			return false, "Stopped"
 		end
-		prepareTravel(current.questPlace, false)
+		prepareTravel(current.questPlace, true)
 		local sent, problem = fire(remote, portal)
 		if not sent then
 			return false, tostring(problem)
 		end
-		status("Joining the Dark King quest", "Joining the quest. Chapter 1 is manual for now.", 0.15)
+		status("Joining the Dark King quest", "The helper will continue in Chapter 1", 0.15)
 		pause(20, generation)
-		return false, "Try DTI's portal again if you didn't join. Chapter 1 is manual for now."
+		return false, "Try DTI's portal again if you didn't join."
+	end
+	function Dti.run(generation)
+		if verify(current, true) == true then
+			return true, "DTI's Hollow badge is already earned"
+		end
+		if not active(generation) then
+			return false, "Stopped"
+		end
+		if game.PlaceId ~= current.chapterPlace then
+			return Dti.enter(generation)
+		end
+		local session = {
+			generation = generation,
+			bound = {},
+			remotes = {},
+			progressAt = os.clock(),
+			badgeAt = 0,
+			retry = setmetatable({}, { __mode = "k" }),
+			collected = setmetatable({}, { __mode = "k" }),
+			whacked = setmetatable({}, { __mode = "k" }),
+			explored = setmetatable({}, { __mode = "k" }),
+		}
+		table.insert(App.cleanups, function()
+			Dti.clear(session)
+		end)
+		local deadline = os.clock() + 5400
+		while active(generation) and os.clock() < deadline do
+			if os.clock() >= session.badgeAt then
+				session.badgeAt = os.clock() + (session.sistersEnded and 3 or 15)
+				if verify(current, true) == true then
+					return true, "DTI's Chapter 1 badge earned"
+				end
+			end
+			Dti.step(session, generation)
+			if os.clock() - session.progressAt > 360 then
+				return false, "No quest progress for a while. Check the current task, then try Start again."
+			end
+			if not pause(0.15, generation) then
+				break
+			end
+		end
+		return false, active(generation) and "The chapter helper reached its time limit" or "Stopped"
 	end
 	runners.dti = Dti.run
 end
@@ -24316,6 +24985,909 @@ do
 	end
 end
 
+-- lanterns + event guides
+do
+	local Event7 = {}
+	local amber = Color3.fromRGB(255, 191, 78)
+	local red = Color3.fromRGB(255, 100, 114)
+	local mint = Color3.fromRGB(116, 224, 179)
+
+	function Event7.part(object)
+		if not object or not object:IsDescendantOf(workspace) then
+			return nil
+		end
+		if object:IsA("BasePart") then
+			return object
+		end
+		if object:IsA("Attachment") then
+			return Event7.part(object.Parent)
+		end
+		if object:IsA("Model") and object.PrimaryPart then
+			return object.PrimaryPart
+		end
+		return object:FindFirstChildWhichIsA("BasePart", true)
+	end
+
+	function Event7.torch()
+		local model = App.player and App.player.Character
+		local backpack = App.player and App.player:FindFirstChild("Backpack")
+		local tool = model and model:FindFirstChild("Torch") or backpack and backpack:FindFirstChild("Torch")
+		return tool and tool:IsA("Tool") and tool or nil
+	end
+
+	function Event7.lit(part, accepted)
+		return accepted and accepted[part] == true
+			or part.Material == Enum.Material.Neon
+			or part:FindFirstChildOfClass("PointLight") ~= nil
+	end
+
+	function Event7.pumpkins(accepted)
+		local list = {}
+		for _, part in ipairs(Collection:GetTagged("%JackOLantern")) do
+			if
+				part:IsA("BasePart")
+				and part:IsDescendantOf(workspace)
+				and part:GetAttribute(tostring(App.player.UserId))
+				and not Event7.lit(part, accepted)
+			then
+				table.insert(list, { object = part, part = part, title = "Unlit pumpkin", color = amber })
+			end
+		end
+		return list
+	end
+
+	function Event7.closest(list, blocked)
+		local _, root = character()
+		local best, distance
+		if not root then
+			return nil
+		end
+		for _, item in ipairs(list) do
+			if
+				item.part
+				and item.part:IsDescendantOf(workspace)
+				and (not blocked or (blocked[item.object] or 0) <= os.clock())
+			then
+				local gap = (item.part.Position - root.Position).Magnitude
+				if not distance or gap < distance then
+					best, distance = item, gap
+				end
+			end
+		end
+		return best
+	end
+
+	function Event7.interact(session, prompt, generation, allowed)
+		local part = prompt and Event7.part(prompt.Parent)
+		if not part or not prompt.Enabled then
+			return false
+		end
+		local moved = approach(part.Position, generation, nil, nil, allowed, { settleSeconds = 0.12 })
+		if not moved or not active(generation) then
+			return false
+		end
+		return EventInput.hold(session, prompt, generation, allowed)
+	end
+
+	function Event7.touch(part, generation)
+		local _, root = character()
+		if
+			not active(generation)
+			or not root
+			or not part.Parent
+			or part.CanTouch == false
+			or (root.Position - part.Position).Magnitude > 8
+			or type(firetouchinterest) ~= "function"
+		then
+			return false
+		end
+		local began = pcall(firetouchinterest, root, part, 0)
+		if began then
+			pause(0.05, generation)
+			pcall(firetouchinterest, root, part, 1)
+		end
+		return began and active(generation)
+	end
+
+	function Bridge.lanternsCompleted()
+		for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+			if tonumber(number) == 7 then
+				return true
+			end
+		end
+		return false
+	end
+
+	function Bridge.solveLanterns(_, _, generation)
+		local session = { accepted = {}, blocked = {} }
+		table.insert(App.cleanups, function()
+			EventInput.release(session)
+		end)
+		for _, name in ipairs({ "Brazier", "JackOLantern" }) do
+			local loaded, why = hollowModule(name, generation)
+			if not loaded then
+				return false, why
+			end
+		end
+		while active(generation) do
+			if App.player:GetAttribute("HasRelic") == true then
+				return true
+			end
+			if App.player:GetAttribute("InMaze") ~= 7 then
+				return false, "The floor changed. Start again inside floor 7."
+			end
+			local tool = Event7.torch()
+			local model, _, humanoid = character()
+			if session.model ~= model then
+				session.model, session.accepted, session.blocked = model, {}, {}
+			end
+			if tool and model and tool.Parent ~= model then
+				pcall(humanoid.EquipTool, humanoid, tool)
+				pause(0.2, generation)
+			end
+			if not model then
+				status("Waiting to respawn", "", 0.1)
+			elseif not tool or tool:GetAttribute("Lit") ~= true then
+				status("Getting a lit torch", "", 0.1)
+				local braziers = {}
+				for _, part in ipairs(Collection:GetTagged("%Brazier")) do
+					if Event7.part(part) then
+						table.insert(braziers, { object = part, part = Event7.part(part) })
+					end
+				end
+				local nextBrazier = Event7.closest(braziers, session.blocked)
+				if nextBrazier then
+					local part = nextBrazier.part
+					local prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+					if prompt then
+						Event7.interact(session, prompt, generation)
+					else
+						approach(part.Position, generation)
+					end
+					local got = waitUntil(function()
+						local torch = Event7.torch()
+						return torch and torch:GetAttribute("Lit") == true
+					end, 1.5, generation)
+					if not got and active(generation) then
+						local _, root = character()
+						local remote = part:FindFirstChild("LightRemote")
+						if root and (root.Position - part.Position).Magnitude <= 10 then
+							fire(remote)
+						end
+					end
+					session.blocked[nextBrazier.object] = os.clock() + 3
+				end
+			else
+				local pumpkins = Event7.pumpkins(session.accepted)
+				local nextPumpkin = Event7.closest(pumpkins, session.blocked)
+				status("Lighting pumpkins", #pumpkins .. " unlit nearby", 0.35)
+				if nextPumpkin then
+					local part = nextPumpkin.part
+					local allowed = function()
+						local now = Event7.torch()
+						return App.player:GetAttribute("InMaze") == 7
+							and now
+							and now.Parent == App.player.Character
+							and now:GetAttribute("Lit") == true
+							and part.Parent
+							and part:GetAttribute(tostring(App.player.UserId))
+					end
+					local prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+					if prompt then
+						Event7.interact(session, prompt, generation, allowed)
+					else
+						approach(part.Position, generation, nil, nil, allowed)
+					end
+					local lit = waitUntil(function()
+						return Event7.lit(part, session.accepted)
+					end, 1, generation)
+					if not lit and active(generation) and allowed() then
+						local _, root = character()
+						local remote = part:FindFirstChild("LightRemote")
+						if
+							remote
+							and remote:IsA("RemoteFunction")
+							and root
+							and (root.Position - part.Position).Magnitude <= 10
+						then
+							local ok, result = invoke(remote, generation)
+							if ok and result == true then
+								session.accepted[part] = true
+							end
+						end
+					end
+					session.blocked[part] = os.clock() + 3
+				end
+			end
+			pause(0.35, generation)
+		end
+		return false, "Stopped"
+	end
+
+	-- banana
+	function Event7.bananaState()
+		local properties = workspace:FindFirstChild("GameProperties")
+		local data = App.player:FindFirstChild("UserDataHolder")
+		local quest = data and data:FindFirstChild("HollowQuest")
+		if not properties or not quest or not quest:IsA("BoolValue") then
+			return nil
+		end
+		local function value(name)
+			local object = properties:FindFirstChild(name)
+			return object and object.Value
+		end
+		return {
+			unlocked = quest.Value == true,
+			playing = value("GameBegan") == true,
+			escape = value("GameBegan") == true and value("EscapeSignal") == true,
+			team = App.player.Team and App.player.Team.Name or "",
+			map = getPath(workspace, "GameKeeper", "Map"),
+		}
+	end
+
+	function Event7.bananaItems()
+		local list = {}
+		local state = Event7.bananaState()
+		if not state then
+			return list
+		end
+		if state.playing and state.team == "Runners" and not state.unlocked then
+			for _, object in ipairs(Collection:GetTagged("HollowKey")) do
+				local part = Event7.part(object)
+				if part and state.map and object:IsDescendantOf(state.map) then
+					table.insert(
+						list,
+						{ object = object, part = part, title = "Hollow key", color = amber, kind = "key" }
+					)
+				end
+			end
+		end
+		if state.escape and state.team == "Runners" then
+			local exits = getPath(workspace, "GameKeeper", "Exits")
+			for _, object in ipairs(exits and exits:GetChildren() or {}) do
+				local part = object:FindFirstChild("Trigger", true)
+					or object:FindFirstChild("Hitbox", true)
+					or object:FindFirstChild("Door", true)
+					or Event7.part(object)
+				part = Event7.part(part)
+				if part then
+					table.insert(list, { object = object, part = part, title = "Escape", color = mint, kind = "exit" })
+				end
+			end
+		end
+		if state.unlocked and state.team == "Lobby" then
+			local doors = getPath(workspace, "HollowQuestHolder", "HollowDoorsHolder")
+			local door = doors and doors:FindFirstChild("Door_Open")
+			local prompt = door and door:FindFirstChildWhichIsA("ProximityPrompt", true)
+			local part = prompt and Event7.part(prompt.Parent)
+			if part then
+				table.insert(
+					list,
+					{ object = door, part = part, prompt = prompt, title = "Red door", color = red, kind = "redDoor" }
+				)
+			end
+		end
+		return list
+	end
+
+	function Event7.bananas()
+		local list = {}
+		for _, name in ipairs({ "GameBananas", "GameBots" }) do
+			local holder = workspace:FindFirstChild(name)
+			for _, object in ipairs(holder and holder:GetChildren() or {}) do
+				local part = Event7.part(object)
+				if part then
+					table.insert(list, { object = object, part = part, title = "Banana", color = red, kind = "threat" })
+				end
+			end
+		end
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= App.player and player.Team and player.Team.Name == "Banana" then
+				local part = Event7.part(player.Character)
+				if part then
+					table.insert(
+						list,
+						{ object = player.Character, part = part, title = "Banana", color = red, kind = "threat" }
+					)
+				end
+			end
+		end
+		return list
+	end
+
+	function Event7.clearance(point, threats)
+		local distance = math.huge
+		for _, item in ipairs(threats) do
+			distance = math.min(distance, (point - item.part.Position).Magnitude)
+		end
+		return distance
+	end
+
+	function Event7.heldKey(model)
+		local item = model and model:FindFirstChild("Item")
+		if not item then
+			return false
+		end
+		local name = item:FindFirstChild("ItemName", true)
+		return name and name:IsA("StringValue") and name.Value == "HollowKey" or false
+	end
+
+	function Event7.runBanana(generation)
+		local session = { blocked = {} }
+		table.insert(App.cleanups, function()
+			EventInput.release(session)
+		end)
+		local joinAt, badgeAt, doorAt = 0, 0, 0
+		while active(generation) do
+			if os.clock() >= badgeAt then
+				badgeAt = os.clock() + 15
+				if verify(current) then
+					return true, "Hollow badge earned"
+				end
+			end
+			if not active(generation) then
+				break
+			end
+			if game.PlaceId == 105438027287525 then
+				status("Inside the red door", "Waiting for the game to award the badge", 0.95)
+				pause(1, generation)
+				continue
+			end
+			local state = Event7.bananaState()
+			local model, root = character()
+			if not state or not root then
+				status("Loading Banana Eats", "Waiting for your round data", 0)
+			elseif state.unlocked and state.team == "Lobby" then
+				status("Entering the red door", "", 0.85)
+				local door = Event7.closest(Event7.bananaItems())
+				if door and os.clock() >= doorAt then
+					doorAt = os.clock() + 15
+					prepareTravel(105438027287525, true)
+					Event7.interact(session, door.prompt, generation, function()
+						local latest = Event7.bananaState()
+						return latest and latest.unlocked and latest.team == "Lobby"
+					end)
+				end
+			elseif state.team == "Runners" and state.playing then
+				if session.model ~= model or session.map ~= state.map then
+					session.model, session.map, session.touched, session.blocked = model, state.map, nil, {}
+				end
+				local threats = Event7.bananas()
+				local holding = Event7.heldKey(model) or session.touched ~= nil or state.unlocked
+				local candidates = {}
+				for _, item in ipairs(Event7.bananaItems()) do
+					if
+						(item.kind == "exit" and holding or item.kind == "key" and not holding)
+						and Event7.clearance(item.part.Position, threats) > 28
+					then
+						table.insert(candidates, item)
+					end
+				end
+				local item = Event7.closest(candidates, session.blocked)
+				if item then
+					status(
+						item.kind == "key" and "Getting the Hollow key" or "Leaving the round",
+						"",
+						holding and 0.65 or 0.2
+					)
+					local before = model:FindFirstChild("Item")
+					local moved = approach(item.part.Position, generation, nil, nil, function()
+						local latest = Event7.bananaState()
+						return latest
+							and latest.playing
+							and latest.team == "Runners"
+							and latest.map == state.map
+							and item.part.Parent
+							and Event7.clearance(item.part.Position, Event7.bananas()) > 20
+					end)
+					if moved and active(generation) and App.player.Character == model then
+						local latest = Event7.bananaState()
+						if
+							latest
+							and latest.playing
+							and latest.team == "Runners"
+							and latest.map == state.map
+							and (item.kind == "exit" or not Event7.heldKey(model))
+						then
+							Event7.touch(item.part, generation)
+						end
+					end
+					if moved and item.kind == "key" then
+						waitUntil(function()
+							return Event7.heldKey(model)
+								or model:FindFirstChild("Item") ~= before
+								or not item.object:IsDescendantOf(workspace)
+						end, 1.5, generation)
+						if
+							Event7.heldKey(model)
+							or model:FindFirstChild("Item") and model:FindFirstChild("Item") ~= before
+						then
+							session.touched = item.object
+						end
+					end
+					session.blocked[item.object] = os.clock() + (item.kind == "key" and 5 or 3)
+				else
+					status(
+						holding and "Surviving with the key" or "Looking for a safe key",
+						"Waiting for an open exit",
+						holding and 0.5 or 0.1
+					)
+					if Event7.clearance(root.Position, threats) < 45 then
+						local spawns = state.map and state.map:FindFirstChild("RunnerSpawns")
+						local safest, distance = nil, 55
+						for _, spawn in ipairs(spawns and spawns:GetChildren() or {}) do
+							local part = Event7.part(spawn)
+							local gap = part and Event7.clearance(part.Position, threats) or 0
+							if gap > distance then
+								safest, distance = part, gap
+							end
+						end
+						if safest then
+							approach(safest.Position, generation, nil, nil, function()
+								local latest = Event7.bananaState()
+								return latest
+									and latest.playing
+									and latest.team == "Runners"
+									and latest.map == state.map
+							end)
+						end
+					end
+				end
+			elseif state.team == "Banana" then
+				status("You're Banana this round", "Waiting for the next survivor round", 0.1)
+			else
+				session.touched = nil
+				status("Waiting for a survivor round", "Find a Hollow key, survive, then enter the red door", 0.05)
+				if os.clock() >= joinAt then
+					joinAt = os.clock() + 10
+					local gui = App.player:FindFirstChild("PlayerGui")
+					local afk = gui and gui:FindFirstChild("AFKLabel", true)
+					local events = Storage:FindFirstChild("Events")
+					if afk and afk:IsA("GuiObject") and afk.Visible then
+						invoke(events and events:FindFirstChild("ActiveToggle"), generation)
+					end
+					if active(generation) then
+						invoke(events and events:FindFirstChild("JoinRequest"), generation)
+					end
+				end
+			end
+			pause(0.35, generation)
+		end
+		return false, "Stopped"
+	end
+
+	-- shawarma
+	function Event7.eventTarget(object)
+		if not object or not object:IsDescendantOf(workspace) then
+			return false
+		end
+		local halloween = workspace:FindFirstChild("Halloween")
+		if halloween and object:IsDescendantOf(halloween) then
+			return true
+		end
+		local text = object:IsA("ProximityPrompt") and string.lower(object.ActionText .. " " .. object.ObjectText) or ""
+		return text:find("breach", 1, true) ~= nil or text:find("hollow", 1, true) ~= nil
+	end
+
+	function Event7.shawarmaIndex()
+		if Event7.index then
+			return Event7.index
+		end
+		local index = { prompts = {}, connections = {} }
+		Event7.index = index
+		local function add(object)
+			if object:IsA("ProximityPrompt") or object:IsA("ClickDetector") then
+				index.prompts[object] = true
+			end
+		end
+		table.insert(index.connections, workspace.DescendantAdded:Connect(add))
+		table.insert(
+			index.connections,
+			workspace.DescendantRemoving:Connect(function(object)
+				index.prompts[object] = nil
+			end)
+		)
+		for count, object in ipairs(workspace:GetDescendants()) do
+			if Event7.index ~= index or not App.alive then
+				return index
+			end
+			add(object)
+			if count % 400 == 0 then
+				task.wait()
+			end
+		end
+		return index
+	end
+
+	function Event7.shawarmaItems()
+		local list = {}
+		for object in pairs(Event7.shawarmaIndex().prompts) do
+			local enabled = object:IsA("ClickDetector") or object.Enabled
+			local part = enabled and Event7.eventTarget(object) and Event7.part(object.Parent)
+			if part then
+				table.insert(
+					list,
+					{ object = object, part = part, kind = "prompt", title = "Hollow interaction", color = mint }
+				)
+			end
+		end
+		for _, object in ipairs(Collection:GetTagged("canHold")) do
+			local part = Event7.eventTarget(object) and Event7.part(object)
+			if part then
+				table.insert(
+					list,
+					{ object = object, part = part, kind = "hold", title = "Hollow breach", color = amber }
+				)
+			end
+		end
+		return list
+	end
+
+	function Event7.face(session, part)
+		EventInput.endLook(session)
+		local camera = workspace.CurrentCamera
+		if not camera or App.cameraBusy or camera.CameraType == Enum.CameraType.Scriptable then
+			return false
+		end
+		local look =
+			{ camera = camera, kind = camera.CameraType, previous = camera.CFrame, cameraEpoch = App.cameraEpoch }
+		session.look = look
+		look.update = function()
+			if session.look ~= look then
+				return
+			end
+			if
+				not App.alive
+				or App.cameraBusy
+				or App.cameraEpoch ~= look.cameraEpoch
+				or workspace.CurrentCamera ~= camera
+				or camera.CameraType ~= look.kind
+				or not part.Parent
+			then
+				EventInput.endLook(session)
+				return
+			end
+			if (camera.CFrame.Position - part.Position).Magnitude > 0.1 then
+				if look.aim and camera.CFrame ~= look.aim then
+					look.previous = camera.CFrame
+				end
+				look.aim = CFrame.lookAt(camera.CFrame.Position, part.Position)
+				camera.CFrame = look.aim
+			end
+		end
+		look.update()
+		EventInput.lookSerial = (EventInput.lookSerial or 0) + 1
+		look.binding = "HollowEventLook_" .. EventInput.lookSerial
+		local ok = pcall(
+			RunService.BindToRenderStep,
+			RunService,
+			look.binding,
+			Enum.RenderPriority.Last.Value - 1,
+			function()
+				local updated = pcall(look.update)
+				if not updated then
+					EventInput.endLook(session)
+				end
+			end
+		)
+		if not ok then
+			look.binding = nil
+		end
+		return true
+	end
+
+	function Event7.shawarmaUse(session, item, generation)
+		local object, part = item.object, item.part
+		local allowed = function()
+			return Event7.eventTarget(object) and part.Parent and character() ~= nil
+		end
+		if item.kind == "prompt" and object:IsA("ProximityPrompt") then
+			return Event7.interact(session, object, generation, allowed)
+		end
+		if not approach(part.Position, generation, nil, nil, allowed, { settleSeconds = 0.15 }) then
+			return false
+		end
+		if not Event7.face(session, part) then
+			return false
+		end
+		local duration = item.kind == "hold" and object:GetAttribute("HoldTime") or 0
+		duration = type(duration) == "number" and math.clamp(duration, 0, 30) or 0
+		local finish = os.clock() + duration + 0.15
+		while active(generation) and allowed() and os.clock() < finish do
+			if session.look then
+				session.look.update()
+			end
+			if not pause(0.05, generation) then
+				break
+			end
+		end
+		local ok = false
+		local _, root = character()
+		if active(generation) and allowed() and root and (root.Position - part.Position).Magnitude <= 12 then
+			if item.kind == "hold" and Collection:HasTag(object, "canHold") then
+				ok = fire(getPath(Storage, "MouseHolded", "Server"), object)
+			elseif object:IsA("ClickDetector") and type(fireclickdetector) == "function" then
+				ok = pcall(fireclickdetector, object)
+			end
+		end
+		EventInput.release(session)
+		return ok
+	end
+
+	function Event7.runShawarma(generation)
+		local session = { blocked = {}, count = 0, connections = {} }
+		table.insert(App.cleanups, function()
+			EventInput.release(session)
+			for _, connection in ipairs(session.connections) do
+				connection:Disconnect()
+			end
+			if not Event7.markers then
+				Event7.closeIndex()
+			end
+		end)
+		if game.PlaceId == current.place then
+			prepareTravel(current.eventPlace, true)
+			local hub = waitUntil(function()
+				return getPath(workspace, "TeleportHubs", "Story1")
+			end, 30, generation)
+			local gate = hub and (hub:FindFirstChild("GatePart") or hub:FindFirstChild("spawnPart"))
+			if not gate then
+				return false, "The Story Mode queue hasn't loaded"
+			end
+			if not waitUntil(character, 25, generation) then
+				return false, "Waiting for your character"
+			end
+			status("Joining Story Mode", "Choosing the full story", 0.05)
+			local chosen, nextChoice = false, 0
+			local opened = Storage:FindFirstChild("StoryChoice_Open")
+			if opened and opened:IsA("RemoteEvent") then
+				table.insert(
+					session.connections,
+					opened.OnClientEvent:Connect(function(hubName)
+						if active(generation) and hubName == hub.Name then
+							chosen = fire(Storage:FindFirstChild("StoryChoice_Pick"), hubName, "full")
+						end
+					end)
+				)
+			end
+			if not approach(gate.Position, generation) then
+				return false, "Couldn't reach the Story Mode queue"
+			end
+			Event7.touch(gate, generation)
+			local deadline = os.clock() + 90
+			while active(generation) and os.clock() < deadline do
+				local panel = getPath(App.player, "PlayerGui", "ResponsiveGUI", "Root", "TeleportStory")
+				if
+					not chosen
+					and panel
+					and panel.Visible
+					and panel:GetAttribute("CurrentHubName") == hub.Name
+					and os.clock() >= nextChoice
+				then
+					nextChoice = os.clock() + 3
+					chosen = fire(Storage:FindFirstChild("StoryChoice_Pick"), hub.Name, "full")
+				end
+				pause(0.25, generation)
+			end
+			return false, active(generation) and "The queue didn't leave. Rejoin Story Mode and try again." or "Stopped"
+		end
+		local controller, progressRemote, voteRemote, badgeAt, voteAt = nil, nil, nil, 0, 0
+		while active(generation) do
+			if os.clock() >= badgeAt then
+				badgeAt = os.clock() + 15
+				if verify(current) then
+					return true, "Hollow badge earned"
+				end
+			end
+			if not active(generation) then
+				break
+			end
+			local nextController = getPath(workspace, "Halloween", "Voids", "VoidScript")
+			if nextController ~= controller then
+				for _, connection in ipairs(session.connections) do
+					connection:Disconnect()
+				end
+				table.clear(session.connections)
+				controller, progressRemote, voteRemote = nextController, nil, nil
+				session.count, session.final, session.blocked = 0, false, {}
+			end
+			local progress = controller and controller:FindFirstChild("TheHollowProgressRemote")
+			if progress and progress ~= progressRemote and progress:IsA("RemoteEvent") then
+				progressRemote = progress
+				table.insert(
+					session.connections,
+					progress.OnClientEvent:Connect(function(kind, value)
+						if not active(generation) then
+							return
+						end
+						if kind == "Progress" or kind == "Final" then
+							session.count = math.clamp(tonumber(value) or session.count, 0, 7)
+							session.final = kind == "Final"
+						elseif kind == "Opening" then
+							session.opening = true
+						end
+					end)
+				)
+				fire(progressRemote, "Ready")
+			end
+			local vote = controller and controller:FindFirstChild("TheHollowVoteRemote")
+			if vote and vote ~= voteRemote and vote:IsA("RemoteEvent") then
+				voteRemote = vote
+				fire(voteRemote, "Ready")
+			end
+			local voteGui = getPath(App.player, "PlayerGui", "TheHollowVoteGui")
+			local yes = voteGui and voteGui:FindFirstChild("VoteYes", true)
+			if
+				voteRemote
+				and voteGui
+				and voteGui.Enabled
+				and yes
+				and yes.Visible
+				and yes.Active
+				and os.clock() >= voteAt
+			then
+				voteAt = os.clock() + 10
+				fire(voteRemote, "Vote", "Yes")
+			end
+			local item = not session.final and Event7.closest(Event7.shawarmaItems(), session.blocked)
+			if not active(generation) then
+				break
+			end
+			if item then
+				status("Closing the breach", session.count .. " / 7 sealed", session.count / 7)
+				Event7.shawarmaUse(session, item, generation)
+				session.blocked[item.object] = os.clock() + 8
+			else
+				status(
+					session.final and "Breach sealed" or "Waiting for the next Hollow task",
+					session.final and "Waiting for the badge"
+						or session.count .. " / 7 sealed. Hollow markers can help with manual steps.",
+					session.count / 7
+				)
+			end
+			pause(0.35, generation)
+		end
+		return false, "Stopped"
+	end
+
+	-- markers
+	function Event7.clearMarkers()
+		local state = Event7.markers
+		Event7.markers = nil
+		if state then
+			state.closed = true
+			for _, marker in pairs(state.items) do
+				marker.folder:Destroy()
+				marker.highlight:Destroy()
+			end
+			if state.worldFolder then
+				state.worldFolder:Destroy()
+			end
+		end
+	end
+
+	function Event7.closeIndex()
+		if Event7.index then
+			for _, connection in ipairs(Event7.index.connections) do
+				connection:Disconnect()
+			end
+			Event7.index = nil
+		end
+	end
+
+	function Event7.clear()
+		Event7.clearMarkers()
+		Event7.closeIndex()
+	end
+
+	function Event7.items()
+		if current.id == "banana" then
+			local items = Event7.bananaItems()
+			for _, item in ipairs(Event7.bananas()) do
+				table.insert(items, item)
+			end
+			return items
+		elseif current.id == "shawarma" then
+			return game.PlaceId == current.eventPlace and Event7.shawarmaItems() or {}
+		elseif current.id == "hollow" then
+			local items = Event7.pumpkins()
+			for _, object in ipairs(Collection:GetTagged("%Brazier")) do
+				local part = Event7.part(object)
+				if part then
+					table.insert(items, { object = object, part = part, title = "Torch", color = mint })
+				end
+			end
+			return items
+		end
+		return {}
+	end
+
+	function Event7.updateMarkers(state)
+		if state.closed or not App.alive then
+			return
+		end
+		if not state.worldFolder then
+			state.worldFolder = Instance.new("Folder")
+			state.worldFolder.Name, state.worldFolder.Parent = "HollowEventHighlights", workspace
+		end
+		local _, root = character()
+		local items = Event7.items()
+		if state.closed or not App.alive then
+			return
+		end
+		if root then
+			table.sort(items, function(a, b)
+				return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+			end)
+		end
+		local keep = {}
+		for index, item in ipairs(items) do
+			if index > 24 then
+				break
+			end
+			local marker = state.items[item.object]
+			if not marker then
+				local folder = Instance.new("Folder")
+				folder.Name, folder.Parent = "HollowEventMarker", App.gui
+				local highlight = Instance.new("Highlight")
+				highlight.Adornee = item.object:IsA("Model") and item.object or item.part
+				highlight.FillTransparency, highlight.OutlineColor, highlight.FillColor = 0.8, item.color, item.color
+				highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.AlwaysOnTop, state.worldFolder
+				local billboard = Instance.new("BillboardGui")
+				billboard.Adornee, billboard.AlwaysOnTop = item.part, true
+				billboard.Size, billboard.StudsOffset, billboard.Parent =
+					UDim2.fromOffset(160, 40), Vector3.new(0, 2.5, 0), folder
+				local text = Instance.new("TextLabel")
+				text.Size, text.BackgroundTransparency = UDim2.fromScale(1, 1), 1
+				text.TextSize, text.Font, text.TextStrokeTransparency, text.TextColor3 =
+					13, Enum.Font.GothamMedium, 0.2, item.color
+				text.Parent = billboard
+				marker = { folder = folder, text = text, billboard = billboard, highlight = highlight }
+				state.items[item.object] = marker
+			end
+			marker.billboard.Adornee = item.part
+			marker.highlight.Adornee = item.object:IsA("Model") and item.object or item.part
+			local title = item.title
+				.. (root and "\n" .. math.floor((root.Position - item.part.Position).Magnitude) .. " studs" or "")
+			if marker.text.Text ~= title then
+				marker.text.Text = title
+			end
+			keep[item.object] = true
+		end
+		for object, marker in pairs(state.items) do
+			if not keep[object] then
+				marker.folder:Destroy()
+				marker.highlight:Destroy()
+				state.items[object] = nil
+			end
+		end
+	end
+
+	function Event7.toggleMarkers()
+		if Event7.markers then
+			Event7.clearMarkers()
+			if not App.running then
+				Event7.closeIndex()
+			end
+			refresh()
+			return
+		end
+		local state = { items = {} }
+		Event7.markers = state
+		refresh()
+		task.spawn(function()
+			while App.alive and Event7.markers == state do
+				pcall(Event7.updateMarkers, state)
+				task.wait(0.35)
+			end
+		end)
+	end
+
+	App.event7 = Event7
+	runners.banana = Event7.runBanana
+	runners.shawarma = Event7.runShawarma
+end
+
 local function start()
 	if App.running or App.traveling or not App.player or not current then
 		return
@@ -24353,6 +25925,8 @@ local function start()
 						or current.id == "mimic"
 						or current.id == "rails"
 						or current.id == "home"
+						or current.id == "banana"
+						or current.id == "shawarma"
 						or character()
 					)
 			end, 25, generation)
@@ -24789,7 +26363,7 @@ local function buildUI(parent)
 		end)
 		button(floors, ">", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(44, 44), function()
 			if not App.running then
-				App.floor = math.min(6, App.floor + 1)
+				App.floor = math.min(7, App.floor + 1)
 				refresh()
 			end
 		end)
@@ -24810,6 +26384,37 @@ local function buildUI(parent)
 				end
 			end)
 		end)
+	end
+	if current and (current.id == "banana" or current.id == "shawarma" or current.id == "hollow") then
+		local title = current.id == "banana" and "Keys / exits / Banana ESP"
+			or current.id == "shawarma" and "Hollow task ESP"
+			or "Torch + pumpkin ESP"
+		ui.event7Title = title
+		ui.event7Markers = button(event, title, UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+			App.event7.toggleMarkers()
+		end)
+		if current.id == "shawarma" then
+			button(event, "Vote yes for The Hollow", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				local remote = getPath(workspace, "Halloween", "Voids", "VoidScript", "TheHollowVoteRemote")
+				local gui = getPath(App.player, "PlayerGui", "TheHollowVoteGui")
+				local yes = gui and gui:FindFirstChild("VoteYes", true)
+				if gui and gui.Enabled and yes and yes.Visible and yes.Active then
+					local ok = fire(remote, "Vote", "Yes")
+					status(ok and "Voted yes" or "Vote isn't ready", "")
+				else
+					status("No vote open", "Join Story Mode to play The Hollow")
+				end
+			end)
+		end
+		label(
+			event,
+			current.id == "shawarma" and "Start handles live Hollow interactions. Kitchen orders may still need you."
+				or "Markers work without Start.",
+			UDim2.fromOffset(0, 0),
+			UDim2.new(1, -8, 0, 48),
+			12,
+			colors.muted
+		)
 	end
 	local rowLabels = {}
 	for index, info in ipairs(Logic.games) do
@@ -24943,6 +26548,12 @@ local function buildUI(parent)
 		end
 		for id, control in pairs(rowLabels) do
 			setProperty(control, "Text", App.rows[id] or "Not checked")
+		end
+		if ui.event7Markers then
+			local enabled = App.event7 and App.event7.markers ~= nil
+			setProperty(ui.event7Markers, "Text", ui.event7Title .. (enabled and ": ON" or ": OFF"))
+			setProperty(ui.event7Markers, "BackgroundColor3", enabled and colors.mint or colors.raised)
+			setProperty(ui.event7Markers, "TextColor3", enabled and colors.base or colors.text)
 		end
 		if ui.floor then
 			setProperty(ui.floor, "Text", tostring(App.floor))
@@ -25246,6 +26857,9 @@ App.unload = function()
 	App.unloading = true
 	App.generation += 1
 	App.running = false
+	if App.event7 then
+		pcall(App.event7.clear)
+	end
 	if App.releaseUI then
 		pcall(App.releaseUI)
 	end
