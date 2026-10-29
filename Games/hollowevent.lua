@@ -3379,6 +3379,10 @@ local function runHollow(generation)
 	if not relic then
 		return false, "The puzzle opened, but the relic hasn't arrived yet"
 	end
+	status("Relic ready", "Heading back in 3 seconds", 0.88)
+	if not pause(3, generation) then
+		return false, "Stopped"
+	end
 	status("Returning the relic", "", 0.9)
 	local exit = waitUntil(function()
 		return nearest("%MazeElevatorExit")
