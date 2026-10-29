@@ -4,6 +4,15 @@ local Logic = {}
 
 Logic.games = {
 	{
+		id = "mega",
+		name = "Survive Overnight in a Mega Store",
+		place = 127380660530951,
+		eventPlace = 121418861436763,
+		universe = 7058980030,
+		badges = { 1102899885295859 },
+		objective = "Collect six of each candy, fill the cauldron and stir it",
+	},
+	{
 		id = "hollow",
 		name = "The Hollow",
 		place = 116463962153167,
@@ -4144,6 +4153,8 @@ local function gardenTools(plantTypes, favoriteKey, seedName, soldTools)
 end
 
 local function gardenHarvest(farm, plantTypes, cooldowns, favoriteKey)
+	local candidates = {}
+	local _, root = character()
 	for _, prompt in ipairs(Collection:GetTagged("CollectPrompt")) do
 		if not prompt:IsA("ProximityPrompt") or not prompt:IsDescendantOf(farm) or not prompt.Enabled then
 			continue
@@ -4172,10 +4183,23 @@ local function gardenHarvest(farm, plantTypes, cooldowns, favoriteKey)
 			and crop:FindFirstChild("Item_Seed")
 			and crop:FindFirstChild("Variant")
 		then
-			return crop, prompt
+			local point = positionOf(prompt.Parent)
+			if point then
+				table.insert(candidates, {
+					crop = crop,
+					prompt = prompt,
+					distance = root
+							and ((point.X - root.Position.X) ^ 2 + (point.Y - root.Position.Y) ^ 2 + (point.Z - root.Position.Z) ^ 2)
+						or 0,
+				})
+			end
 		end
 	end
-	return nil
+	table.sort(candidates, function(a, b)
+		return a.distance < b.distance
+	end)
+	local chosen = candidates[1]
+	return chosen and chosen.crop, chosen and chosen.prompt, candidates
 end
 
 local function gardenPlantPosition(farm, cursor)
@@ -4641,8 +4665,30 @@ local function runGarden(generation)
 		elseif crop then
 			local moved, why = approach(positionOf(prompt.Parent), generation, physical)
 			if moved and ready(farm) and gardenHarvest(farm, plantTypes, cooldowns, enums.Favorite) == crop then
-				local sent = fire(remote("Crops", "Collect"), { crop })
-				cooldowns[crop] = os.clock() + 3
+				local _, root = character()
+				local _, _, nearby = gardenHarvest(farm, plantTypes, cooldowns, enums.Favorite)
+				local batch = {}
+				for _, entry in ipairs(nearby) do
+					local point = positionOf(entry.prompt.Parent)
+					local reach = type(entry.prompt.MaxActivationDistance) == "number"
+							and entry.prompt.MaxActivationDistance
+						or 8
+					if
+						point
+						and root
+						and (point.X - root.Position.X) ^ 2 + (point.Y - root.Position.Y) ^ 2 + (point.Z - root.Position.Z) ^ 2
+							<= math.min(reach, 12) ^ 2
+					then
+						table.insert(batch, entry.crop)
+						if #batch >= 8 then
+							break
+						end
+					end
+				end
+				local sent = #batch > 0 and fire(remote("Crops", "Collect"), batch)
+				for _, plant in ipairs(batch) do
+					cooldowns[plant] = os.clock() + 3
+				end
 				local collected = sent
 					and waitUntil(function()
 						local _, harvested = gardenTools(plantTypes, enums.Favorite, seedName, soldTools)
@@ -9234,6 +9280,35 @@ local function resetMooAfterChest(session, generation)
 end
 
 local function collectMooChest(session, generation)
+	if not active(generation) then
+		return false, "Stopped"
+	end
+	for _, entry in pairs(session.memory.chests) do
+		local pending = entry.pending
+		if pending then
+			if pending.phase ~= session.game.GameStateChangedAt then
+				entry.pending = nil
+			elseif pending.request.Response == session.common.ResponseType.AwaitingResponse and not entry.claimed then
+				return nil, "Waiting for the chest reply"
+			elseif entry.claimed or pending.request.Response == session.common.ResponseType.Success then
+				entry.pending, entry.claimed = nil, true
+				if pending.before then
+					session.memory.reset = {
+						model = pending.model,
+						phase = pending.phase,
+						entry = entry,
+						ghosts = pending.before.ghosts,
+						owned = pending.before.owned,
+						at = os.clock(),
+					}
+				end
+				return nil, "Chest opened. Checking the reward."
+			else
+				entry.pending, entry.attempted = nil, nil
+				entry.blockedUntil = os.clock() + 5
+			end
+		end
+	end
 	if
 		session.memory.reset
 		or (session.memory.resetRound and session.memory.resetRound == session.game.GameStateChangedAt)
@@ -9326,8 +9401,10 @@ local function collectMooChest(session, generation)
 		Args = { entry.id },
 	})
 	if not ok or type(request) ~= "table" then
-		return false, "Secret chest request failed: " .. tostring(request)
+		entry.attempted, entry.blockedUntil = nil, os.clock() + 5
+		return nil, "The chest didn't respond. Retrying shortly."
 	end
+	entry.pending = { request = request, before = before, model = model, phase = phaseAt }
 	waitUntil(function()
 		return entry.claimed
 			or request.Response ~= session.common.ResponseType.AwaitingResponse
@@ -9337,6 +9414,7 @@ local function collectMooChest(session, generation)
 		return false, "Stopped"
 	end
 	if entry.claimed or request.Response == session.common.ResponseType.Success then
+		entry.pending = nil
 		if before then
 			session.memory.reset = {
 				model = model,
@@ -9360,10 +9438,11 @@ local function collectMooChest(session, generation)
 		return nil
 	end
 	session.rejected = (session.rejected or 0) + 1
-	if session.rejected >= 3 then
-		return false, "Three chests didn't respond. Try Start again next round."
+	if request.Response ~= session.common.ResponseType.AwaitingResponse then
+		entry.pending, entry.attempted = nil, nil
+		entry.blockedUntil = os.clock() + math.min(3 + session.rejected, 15)
 	end
-	return nil, "That chest hasn't counted yet. Waiting for another."
+	return nil, entry.pending and "Waiting for the chest reply" or "That chest didn't count. Retrying shortly."
 end
 
 local function runMoo(generation)
@@ -9546,8 +9625,9 @@ local function collectDuckCandy(session, generation)
 		.. tostring(session.game.getGameState("Round"))
 	local memory = session.memory
 	if memory.map ~= map or memory.round ~= round then
-		memory.map, memory.round, memory.attempts = map, round, {}
+		memory.map, memory.round, memory.attempts, memory.pending = map, round, {}, {}
 	end
+	memory.pending = memory.pending or {}
 	local chosen, distance
 	local constants = session.toolkit.Constants
 	for object in pairs(session.targets) do
@@ -9558,8 +9638,16 @@ local function collectDuckCandy(session, generation)
 			memory.attempts[object] = nil
 			continue
 		end
+		local pending = memory.pending[object]
+		if pending and pending.done then
+			memory.pending[object] = nil
+		end
+		local attempted = memory.attempts[object]
 		if
-			memory.attempts[object] or not session.toolkit.getCandyData(object:GetAttribute(constants.TypeAttribute))
+			pending and not pending.done
+			or attempted == true
+			or type(attempted) == "number" and attempted > os.clock()
+			or not session.toolkit.getCandyData(object:GetAttribute(constants.TypeAttribute))
 		then
 			continue
 		end
@@ -9587,7 +9675,7 @@ local function collectDuckCandy(session, generation)
 	if not before or before >= session.config.CandyBadgeGoal or not valid() then
 		return nil
 	end
-	memory.attempts[chosen] = true
+	memory.attempts[chosen] = os.clock() + 3
 	if distance > 6 then
 		local moved = approach(chosen.Position + Vector3.new(3, 0, 0), generation, chosen, false, valid)
 		if not moved then
@@ -9599,6 +9687,7 @@ local function collectDuckCandy(session, generation)
 	end
 	local earned = duckProgress(session)
 	if earned and earned > before then
+		memory.attempts[chosen] = true
 		return true, "Candy collected"
 	end
 	local _, nowRoot = duckReady(session)
@@ -9618,15 +9707,20 @@ local function collectDuckCandy(session, generation)
 		or type(promise.andThen) ~= "function"
 		or type(promise.catch) ~= "function"
 	then
-		return false, "Duck Duck's candy request failed: " .. tostring(promise)
+		memory.attempts[chosen] = os.clock() + 5
+		return nil, "Couldn't pick up that candy yet. Trying again shortly."
 	end
+	local receipt = {}
+	memory.pending[chosen] = receipt
 	promise
 		:andThen(function(result)
+			receipt.done = true
 			if result == false then
 				rejected = true
 			end
 		end)
 		:catch(function(reason)
+			receipt.done = true
 			rejected, failure = true, tostring(reason)
 		end)
 	waitUntil(function()
@@ -9642,18 +9736,17 @@ local function collectDuckCandy(session, generation)
 	earned = duckProgress(session)
 	if earned and earned > before then
 		session.unconfirmed = 0
+		memory.attempts[chosen], memory.pending[chosen] = true, nil
 		return true, "Candy collected"
 	end
 	if duckReady(session) ~= model or workspace:FindFirstChild("CurrentMap") ~= map then
 		return nil, "Waiting for the next match"
 	end
 	session.unconfirmed = (session.unconfirmed or 0) + 1
-	if session.unconfirmed >= 3 then
-		return false,
-			"Three candies didn't count. Try Start again next round."
-				.. (failure and (": " .. failure:sub(1, 140)) or "")
-	end
-	return nil, "That candy hasn't counted yet. Looking for another."
+	memory.attempts[chosen] = os.clock() + math.min(3 + session.unconfirmed, 12)
+	return nil,
+		receipt.done and "That candy didn't count. Retrying shortly."
+			or "Waiting for the pickup reply. Checking other candy."
 end
 
 local function travelDuck(generation)
@@ -13002,6 +13095,14 @@ function EventInput.endLook(session)
 end
 
 function EventInput.release(session)
+	local hold = session.holdState
+	session.holdState = nil
+	if hold then
+		hold.closed = true
+		if hold.connection then
+			pcall(hold.connection.Disconnect, hold.connection)
+		end
+	end
 	local prompt = session.prompt
 	session.prompt = nil
 	if prompt then
@@ -13025,19 +13126,70 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 	if not point or type(duration) ~= "number" or duration ~= duration or duration < 0 or duration > 30 then
 		return false, "The interaction changed"
 	end
-	local function ready()
+	if session.holdState then
+		return false, "Finishing the current interaction"
+	end
+	local hold = {}
+	session.holdState = hold
+	local function owned()
+		return session.holdState == hold and not hold.closed and active(generation) and App.player.Character == model
+	end
+	local function completed()
+		if not owned() then
+			return false
+		end
+		if options.accepted then
+			local ok, value = pcall(options.accepted)
+			if ok and value then
+				return true
+			end
+		end
+		return hold.triggered and hold.started and os.clock() >= hold.started + duration
+	end
+	local function finish(ok, why)
+		if session.holdState ~= hold then
+			return false, "The interaction was cancelled"
+		end
+		hold.closed, session.holdState = true, nil
+		if hold.connection then
+			pcall(hold.connection.Disconnect, hold.connection)
+		end
+		if options.keepLook then
+			hold.kept = true
+			if session.prompt then
+				pcall(session.prompt.InputHoldEnd, session.prompt)
+				session.prompt = nil
+			end
+		else
+			EventInput.release(session)
+		end
+		return ok, why
+	end
+	local function ready(retained)
 		local nowModel, nowRoot = character()
 		point = prompt.Parent and EventInput.point(prompt.Parent)
-		return active(generation)
+		local permitted = true
+		if allowed then
+			local ok, value = pcall(allowed)
+			permitted = ok and value
+		end
+		return (
+			owned()
+			or retained
+				and hold.kept
+				and session.holdState == nil
+				and active(generation)
+				and App.player.Character == model
+		)
 			and nowModel == model
 			and point
 			and prompt:IsDescendantOf(workspace)
 			and prompt.Enabled
 			and (nowRoot.Position - point).Magnitude <= prompt.MaxActivationDistance
-			and (not allowed or allowed())
+			and permitted
 	end
 	if not ready() then
-		return false, "Couldn't reach the prompt"
+		return finish(false, "Couldn't reach the prompt")
 	end
 	EventInput.endLook(session)
 	local camera = workspace.CurrentCamera
@@ -13062,7 +13214,7 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 				return
 			end
 			if
-				not ready()
+				not ready(true)
 				or App.cameraBusy
 				or App.cameraEpoch ~= look.cameraEpoch
 				or workspace.CurrentCamera ~= camera
@@ -13095,12 +13247,22 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 			end
 		end
 		if not pause(0.06, generation) or not ready() then
-			EventInput.release(session)
-			return false, "The interaction changed"
+			return finish(completed() == true, "The interaction changed")
+		end
+	end
+	if prompt.Triggered then
+		local ok, connection = pcall(prompt.Triggered.Connect, prompt.Triggered, function(player)
+			if owned() and (player == nil or player == App.player) then
+				hold.triggered = true
+			end
+		end)
+		if ok then
+			hold.connection = connection
 		end
 	end
 	session.prompt = prompt
-	local finish = os.clock() + duration + 0.12
+	hold.started = os.clock()
+	local deadline = hold.started + duration + (hold.connection and 0.45 or 0.12)
 	if session.look and session.look.update then
 		session.look.update()
 	end
@@ -13115,7 +13277,7 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 		began = began and reason ~= false
 	end
 	if began then
-		while ready() and os.clock() < finish do
+		while not completed() and ready() and os.clock() < deadline do
 			if session.look and session.look.update then
 				session.look.update()
 			end
@@ -13123,17 +13285,9 @@ function EventInput.hold(session, prompt, generation, allowed, options)
 				break
 			end
 		end
-		began = ready() and os.clock() >= finish
+		began = completed() or ready() and os.clock() >= deadline
 	end
-	if options.keepLook then
-		if session.prompt then
-			pcall(session.prompt.InputHoldEnd, session.prompt)
-			session.prompt = nil
-		end
-	else
-		EventInput.release(session)
-	end
-	return began, if began then nil else (reason or "The interaction ended early")
+	return finish(began == true, if began then nil else (reason or "The interaction ended early"))
 end
 
 function EventInput.guiPress(object, touch)
@@ -14802,7 +14956,13 @@ function Demon.interact(session, target, generation)
 	session.picked = true
 	local sent, reason = EventInput.hold(session, prompt, generation, function()
 		return allowed(true)
-	end)
+	end, {
+		accepted = function()
+			return Demon.fingerprint(session) ~= before
+				or App.player:GetAttribute("PickingLock")
+				or target:GetAttribute("Uninteractable")
+		end,
+	})
 	if sent then
 		waitUntil(function()
 			return not active(generation)
@@ -16525,7 +16685,12 @@ function Aooni.collect(session, prompt, generation)
 	if not approach(point, generation, prompt.Parent, false, allowed) or not allowed() then
 		return false
 	end
-	EventInput.hold(session, prompt, generation, allowed)
+	EventInput.hold(session, prompt, generation, allowed, {
+		accepted = function()
+			local count = Aooni.progress()
+			return count and count > before
+		end,
+	})
 	waitUntil(function()
 		local count = Aooni.progress()
 		return not allowed() or count and count > before
@@ -18212,7 +18377,7 @@ function Doors.interactNow(state, target, generation, allowed)
 		end
 	end
 	if ready() then
-		local held = EventInput.hold(state, prompt, generation, ready)
+		local held = EventInput.hold(state, prompt, generation, ready, { accepted = changed })
 		return active(generation) and (changed() or held)
 	end
 	return false
@@ -20548,7 +20713,7 @@ do
 				or session.revision ~= revision
 				or Hospital.busy(prompt.Parent)
 		end
-		local ok, why = EventInput.hold(session, prompt, generation, allowed, { keepLook = true })
+		local ok, why = EventInput.hold(session, prompt, generation, allowed, { keepLook = true, accepted = changed })
 		if active(generation) and allowed() and not changed() and type(fireproximityprompt) == "function" then
 			ok, why = call("Hospital prompt", function()
 				if active(generation) and allowed() and not changed() then
@@ -21140,8 +21305,27 @@ do
 			end
 		end
 		session.retry[prompt] = started + 1
+		local nativeName = role == "take" and "TriggerFuelPrompt" or role == "add" and "TriggerLanternPrompt"
+		local native = nativeName and Dti.remote(nativeName)
+		if native and native:IsA("RemoteEvent") then
+			if not allowed() or (root.Position - point).Magnitude > prompt.MaxActivationDistance then
+				return false
+			end
+			local sent = fire(native)
+			if sent then
+				waitUntil(function()
+					return accepted() or not Dti.ready(session, generation)
+				end, 2.5, generation)
+			end
+			if active(generation) and accepted() then
+				session.progressAt = os.clock()
+				return true
+			end
+			session.retry[prompt] = os.clock() + 2
+			return false
+		end
 		session.soulHolding = soul
-		EventInput.hold(session, prompt, generation, allowed)
+		EventInput.hold(session, prompt, generation, allowed, { accepted = accepted })
 		session.soulHolding = nil
 		local confirmed = waitUntil(function()
 			return accepted() or not Dti.ready(session, generation)
@@ -26338,6 +26522,8 @@ do
 				table.insert(items, item)
 			end
 			return items
+		elseif current.id == "mega" then
+			return App.mega.markers()
 		elseif current.id == "shawarma" then
 			return game.PlaceId == current.eventPlace and Event7.shawarmaItems() or {}
 		elseif current.id == "hollow" then
@@ -26439,6 +26625,903 @@ do
 	runners.shawarma = Event7.runShawarma
 end
 
+-- mega store
+do
+	local Mega = {}
+	local candyNames = { "Candy1", "Candy2", "Candy3" }
+	local candyTitles = { Candy1 = "Energy candy", Candy2 = "Night candy", Candy3 = "Health candy" }
+	local cyan, amber, red = Color3.fromRGB(116, 224, 219), Color3.fromRGB(255, 199, 103), Color3.fromRGB(255, 113, 113)
+	local timing = { streamSeconds = 0.2, streamWait = 0.5, settleSeconds = 0.12 }
+
+	function Mega.util()
+		return getPath(workspace, "Map", "Util")
+	end
+
+	function Mega.cauldron()
+		return getPath(Mega.util(), "Cauldron")
+	end
+
+	function Mega.counts()
+		local cauldron = Mega.cauldron()
+		local display = getPath(cauldron, "_Util", "DisplayPart")
+		local counts, total, known = {}, 0, true
+		for _, name in ipairs(candyNames) do
+			local frame = display and display:FindFirstChild(name, true)
+			local label = frame and frame:FindFirstChild("AmountTL", true)
+			local text = label and label:IsA("TextLabel") and label.Text:gsub("<[^>]*>", "")
+			local count = text and tonumber(text:match("%d+"))
+			counts[name] = count and math.clamp(count, 0, 6) or 0
+			total += counts[name]
+			known = known and count ~= nil
+		end
+		return counts, total, known
+	end
+
+	function Mega.inventory()
+		local counts, tools, slots = {}, {}, 0
+		for _, parent in pairs({ App.player:FindFirstChild("Backpack"), App.player.Character }) do
+			if parent then
+				for _, tool in ipairs(parent:GetChildren()) do
+					if tool:IsA("Tool") then
+						slots += 1
+						if candyTitles[tool.Name] then
+							local amount = tonumber(tool:GetAttribute("StackAmount")) or 1
+							counts[tool.Name] = (counts[tool.Name] or 0) + math.max(0, amount)
+							table.insert(tools, tool)
+						end
+					end
+				end
+			end
+		end
+		return counts, tools, slots
+	end
+
+	function Mega.ready()
+		local model, root, humanoid = character()
+		local camera = workspace.CurrentCamera
+		return model
+			and not root.Anchored
+			and humanoid.WalkSpeed > 0
+			and model:GetAttribute("AllowEquipping") ~= false
+			and not App.cameraBusy
+			and camera
+			and camera.CameraType ~= Enum.CameraType.Scriptable
+	end
+
+	function Mega.threats()
+		local items = {}
+		local folder = workspace:FindFirstChild("Enemies")
+		for _, object in ipairs(folder and folder:GetChildren() or {}) do
+			local humanoid = object:FindFirstChildWhichIsA("Humanoid", true)
+			local part = object:FindFirstChild("HumanoidRootPart", true) or App.event7.part(object)
+			if part and part:IsA("BasePart") and (not humanoid or humanoid.Health > 0) then
+				table.insert(items, { object = object, part = part, title = object.Name, color = red })
+			end
+		end
+		return items
+	end
+
+	function Mega.clearance(point)
+		return App.event7.clearance(point, Mega.threats())
+	end
+
+	function Mega.safe()
+		local _, root = character()
+		return Mega.ready() and root and not Mega.danger(root.Position, 12)
+	end
+
+	function Mega.scan()
+		local util = Mega.util()
+		if Mega.cache and Mega.cache.util == util and os.clock() < Mega.cache.untilAt then
+			return Mega.cache.items
+		end
+		local items = {}
+		local folder = getPath(util, "PumpkinChests")
+		for _, object in ipairs(folder and folder:GetChildren() or {}) do
+			for _, prompt in ipairs(object:GetDescendants()) do
+				if prompt:IsA("ProximityPrompt") then
+					local part = App.event7.part(prompt.Parent)
+					if part then
+						table.insert(items, {
+							object = object,
+							part = part,
+							prompt = prompt,
+							kind = "chest",
+							title = "Pumpkin chest",
+							color = amber,
+						})
+					end
+				end
+			end
+		end
+		Mega.cache = { util = util, untilAt = os.clock() + 2, items = items }
+		return items
+	end
+
+	function Mega.items()
+		local items = {}
+		local counts, _, known = Mega.counts()
+		local inventory = Mega.inventory()
+		local folder = getPath(Mega.util(), "Items")
+		for _, object in ipairs(folder and folder:GetChildren() or {}) do
+			if candyTitles[object.Name] then
+				local part = App.event7.part(object)
+				if part and (not known or counts[object.Name] + (inventory[object.Name] or 0) < 6) then
+					table.insert(
+						items,
+						{ object = object, part = part, kind = "candy", title = candyTitles[object.Name], color = cyan }
+					)
+				end
+			end
+		end
+		local phase = getPath(Storage, "GameInfo", "TimeOfDay")
+		local day = phase and string.find(string.lower(tostring(phase.Value)), "day", 1, true)
+		for _, item in ipairs(Mega.scan()) do
+			if item.object:IsDescendantOf(workspace) and item.prompt.Parent and item.prompt.Enabled and not day then
+				table.insert(items, item)
+			end
+		end
+		local reward = Mega.reward()
+		if reward then
+			table.insert(items, reward)
+		end
+		return items
+	end
+
+	function Mega.reward()
+		local output = getPath(Mega.cauldron(), "_Util", "OutputPart")
+		if not output or not output:IsA("BasePart") then
+			return nil
+		end
+		local folder = getPath(Mega.util(), "Items")
+		for _, tool in ipairs(folder and folder:GetChildren() or {}) do
+			if tool:IsA("Tool") and tool.Name == "HalloweenSlingshot" then
+				local part = App.event7.part(tool)
+				if part and (part.Position - output.Position).Magnitude < 15 then
+					return { object = tool, part = part, kind = "reward", title = "Brew reward", color = amber }
+				end
+			end
+		end
+	end
+
+	function Mega.next(session)
+		local pickups, chests = {}, {}
+		local threats = Mega.threats()
+		for _, item in ipairs(Mega.items()) do
+			if not Mega.danger(item.part.Position, item.kind == "chest" and 22 or 12, threats) then
+				table.insert(item.kind == "chest" and chests or pickups, item)
+			end
+		end
+		local pickup = App.event7.closest(pickups, session.blocked)
+		if pickup then
+			return pickup
+		end
+		if #pickups > 0 then
+			return nil, "Waiting to retry the candy pickup"
+		end
+		return App.event7.closest(chests, session.blocked)
+	end
+
+	function Mega.markers()
+		local items = Mega.items()
+		local part = getPath(Mega.cauldron(), "_Util", "InteractPart")
+		if part and part:IsA("BasePart") then
+			table.insert(items, { object = Mega.cauldron(), part = part, title = "Cauldron", color = amber })
+		end
+		for _, item in ipairs(Mega.threats()) do
+			table.insert(items, item)
+		end
+		return items
+	end
+
+	function Mega.move(point, generation, ignore, allowed, within)
+		if not active(generation) or not Mega.ready() or allowed and not allowed() then
+			return false
+		end
+		local _, root = character()
+		if (root.Position - point).Magnitude <= (within or 6) then
+			return true
+		end
+		return approach(point, generation, ignore, nil, function()
+			return Mega.ready() and (not allowed or allowed())
+		end, timing)
+	end
+
+	function Mega.cauldronStand(generation, allowed)
+		local zone = getPath(Mega.cauldron(), "_Util", "IngredientZone")
+		local _, root = character()
+		if not zone or not zone:IsA("BasePart") or not root then
+			return false
+		end
+		local points = {}
+		local radius = math.max(zone.Size.X, zone.Size.Z) / 2 + 3.5
+		for _, offset in ipairs({
+			Vector3.new(radius, 0, 0),
+			Vector3.new(-radius, 0, 0),
+			Vector3.new(0, 0, radius),
+			Vector3.new(0, 0, -radius),
+		}) do
+			table.insert(points, zone.Position + offset)
+		end
+		table.sort(points, function(a, b)
+			return (a - root.Position).Magnitude < (b - root.Position).Magnitude
+		end)
+		for _, point in ipairs(points) do
+			if not Mega.danger(point, 18) and Mega.move(point, generation, nil, allowed, 1) then
+				return true
+			end
+			if not active(generation) or not Mega.ready() then
+				return false
+			end
+		end
+		return false
+	end
+
+	function Mega.evade(generation)
+		if not Mega.ready() then
+			return false
+		end
+		local _, root = character()
+		local threats = Mega.threats()
+		local distance = App.event7.clearance(root.Position, threats)
+		if distance > 12 or not Mega.danger(root.Position, 12, threats) then
+			return false
+		end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { App.player.Character, workspace:FindFirstChild("Enemies") }
+		params.RespectCanCollide = true
+		params.IgnoreWater = true
+		local best, score
+		for i = 1, 12 do
+			local angle = i * math.pi / 6
+			local point = root.Position + Vector3.new(math.cos(angle) * 32, 5, math.sin(angle) * 32)
+			local hit = workspace:Raycast(point, Vector3.new(0, -18, 0), params)
+			if hit and hit.Normal.Y > 0.7 and math.abs(hit.Position.Y + 3 - root.Position.Y) < 7 then
+				local gap = App.event7.clearance(hit.Position, threats)
+				if gap > math.max(25, distance + 8) and (not score or gap > score) then
+					best, score = hit.Position, gap
+				end
+			end
+		end
+		if best then
+			Mega.move(best, generation, nil, function()
+				return Mega.clearance(best) > 23
+			end)
+		end
+		return true
+	end
+
+	-- pickups
+	function Mega.chestStand(item, generation, allowed)
+		local _, root = character()
+		if not root then
+			return false
+		end
+		local points = {}
+		for _, offset in ipairs({
+			Vector3.new(4, 0, 0),
+			Vector3.new(-4, 0, 0),
+			Vector3.new(0, 0, 4),
+			Vector3.new(0, 0, -4),
+		}) do
+			table.insert(points, item.part.Position + offset)
+		end
+		table.sort(points, function(a, b)
+			return (a - root.Position).Magnitude < (b - root.Position).Magnitude
+		end)
+		for _, point in ipairs(points) do
+			if not Mega.danger(point, 22) and Mega.move(point, generation, item.object, allowed, 1) then
+				return true
+			end
+			if not active(generation) or not Mega.ready() then
+				return false
+			end
+		end
+		return false
+	end
+
+	function Mega.danger(point, radius, threats)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { App.player.Character, workspace:FindFirstChild("RaycastIgnore") }
+		params.IgnoreWater = true
+		for _, enemy in ipairs(threats or Mega.threats()) do
+			if (enemy.part.Position - point).Magnitude < radius then
+				local origin = point + Vector3.new(0, 1, 0)
+				local hit = workspace:Raycast(origin, enemy.part.Position + Vector3.new(0, 1, 0) - origin, params)
+				if not hit or hit.Instance == enemy.part or hit.Instance:IsDescendantOf(enemy.object) then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	function Mega.chestDanger(root)
+		return Mega.danger(root.Position, 12)
+	end
+
+	function Mega.holdChest(session, item, generation, fallback, allowed)
+		local prompt = item.prompt
+		local model, root, humanoid = character()
+		if Mega.holding or not model or not prompt or not prompt.Parent or not prompt.Enabled then
+			return false
+		end
+		local duration = prompt.HoldDuration
+		if type(duration) ~= "number" or duration ~= duration or duration < 0 or duration > 30 then
+			return false
+		end
+		local job = { health = humanoid.Health, riskAt = 0, before = {}, connections = {} }
+		local folder = getPath(Mega.util(), "Items")
+		for _, tool in ipairs(folder and folder:GetChildren() or {}) do
+			job.before[tool] = true
+		end
+		Mega.holding = job
+		local function owned()
+			return active(generation)
+				and not session.closed
+				and Mega.holding == job
+				and App.player.Character == model
+				and (not allowed or allowed())
+		end
+		local function opened()
+			if not job.started or not job.triggered and os.clock() < job.started + duration then
+				return false
+			end
+			if not prompt.Parent or not prompt:IsDescendantOf(workspace) or not prompt.Enabled then
+				return true
+			end
+			for _, tool in ipairs(folder and folder:GetChildren() or {}) do
+				local part = candyTitles[tool.Name] and not job.before[tool] and App.event7.part(tool)
+				if part and (part.Position - item.part.Position).Magnitude < 14 then
+					return true
+				end
+			end
+			return false
+		end
+		local function ready()
+			local currentModel, currentRoot, currentHumanoid = character()
+			local point = prompt.Parent and EventInput.point(prompt.Parent)
+			local camera = workspace.CurrentCamera
+			if
+				not owned()
+				or currentModel ~= model
+				or not point
+				or not camera
+				or App.cameraBusy
+				or camera.CameraType == Enum.CameraType.Scriptable
+				or (currentRoot.Position - point).Magnitude > prompt.MaxActivationDistance - 0.1
+				or currentHumanoid.Health < job.health - 0.5
+			then
+				return false
+			end
+			if os.clock() >= job.riskAt then
+				job.riskAt, job.danger = os.clock() + 0.2, Mega.chestDanger(currentRoot)
+			end
+			return not job.danger
+		end
+		local ok, complete = pcall(function()
+			if not ready() or not App.event7.face(session, item.part) then
+				return false
+			end
+			if not pause(0.1, generation) or not ready() then
+				return false
+			end
+			table.insert(
+				job.connections,
+				prompt.Triggered:Connect(function(player)
+					if owned() and (player == nil or player == App.player) then
+						job.triggered = true
+					end
+				end)
+			)
+			session.prompt = prompt
+			job.started = os.clock()
+			local deadline = os.clock() + duration + 1.5
+			local began = false
+			if not fallback or type(fireproximityprompt) ~= "function" then
+				began = pcall(prompt.InputHoldBegin, prompt)
+			end
+			if not began and ready() and type(fireproximityprompt) == "function" then
+				local sent, result = call(prompt, function()
+					if ready() then
+						return fireproximityprompt(prompt, duration)
+					end
+					return false
+				end, duration + 2, generation)
+				began = sent and result ~= false
+			end
+			if not began then
+				return false
+			end
+			while owned() and os.clock() < deadline do
+				if opened() then
+					return true
+				end
+				if not prompt.Enabled then
+					return false
+				end
+				if not ready() then
+					return false
+				end
+				if job.triggered and session.prompt == prompt then
+					pcall(prompt.InputHoldEnd, prompt)
+					session.prompt = nil
+				end
+				if not pause(0.04, generation) then
+					return false
+				end
+			end
+			return owned() and opened()
+		end)
+		for _, connection in ipairs(job.connections) do
+			connection:Disconnect()
+		end
+		EventInput.release(session)
+		if Mega.holding == job then
+			Mega.holding = nil
+		end
+		if ok and complete and active(generation) and not session.closed then
+			local untilAt = os.clock() + 0.8
+			while active(generation) and os.clock() < untilAt and Mega.safe() do
+				if not pause(0.08, generation) then
+					break
+				end
+			end
+			return active(generation)
+		end
+		return false
+	end
+
+	function Mega.use(session, item, generation, move, fallback, allowed)
+		if Mega.holding then
+			return false
+		end
+		local model = App.player.Character
+		local function ready()
+			return active(generation)
+				and Mega.safe()
+				and App.player.Character == model
+				and item.object:IsDescendantOf(workspace)
+				and item.part.Parent
+				and not Mega.danger(item.part.Position, item.kind == "chest" and 22 or 12)
+				and (not allowed or allowed())
+		end
+		if not ready() then
+			return false
+		end
+		if move then
+			local moved = item.kind == "chest" and Mega.chestStand(item, generation, ready)
+				or item.kind ~= "chest" and Mega.move(item.part.Position, generation, nil, ready)
+			if not moved then
+				return false
+			end
+		end
+		local _, root = character()
+		if not ready() or (root.Position - item.part.Position).Magnitude > 9 then
+			return false
+		end
+		if item.kind == "chest" then
+			return Mega.holdChest(session, item, generation, fallback, allowed)
+		end
+		if item.kind == "candy" or item.kind == "reward" then
+			return fire(getPath(Storage, "Remotes", "RequestPickupItem"), item.object)
+		end
+		if not App.event7.face(session, item.part) or not pause(0.15, generation) or not ready() then
+			EventInput.release(session)
+			return false
+		end
+		local prompt = item.prompt or item.object:FindFirstChildWhichIsA("ProximityPrompt", true)
+		local ok = false
+		if prompt and prompt.Enabled then
+			ok = EventInput.hold(session, prompt, generation, ready)
+			if
+				fallback
+				and ready()
+				and type(fireproximityprompt) == "function"
+				and prompt.Parent
+				and prompt.Enabled
+			then
+				local sent, result = call(prompt, function()
+					if ready() then
+						return fireproximityprompt(prompt, prompt.HoldDuration)
+					end
+					return false
+				end, prompt.HoldDuration + 2, generation)
+				ok = sent and result ~= false
+			end
+		end
+		EventInput.release(session)
+		return ok
+	end
+
+	function Mega.deposit(session, generation, move, allowed)
+		local cauldron = Mega.cauldron()
+		local zone = getPath(cauldron, "_Util", "IngredientZone")
+		local counts, _, known = Mega.counts()
+		if not zone or not zone:IsA("BasePart") then
+			return false
+		end
+		local function ready()
+			return active(generation)
+				and Mega.safe()
+				and zone.Parent
+				and Mega.cauldron() == cauldron
+				and cauldron:GetAttribute("CauldronState") == "Collecting"
+				and (not allowed or allowed())
+		end
+		if not ready() then
+			return false
+		end
+		local _, tools = Mega.inventory()
+		for _, tool in ipairs(tools) do
+			if counts[tool.Name] < 6 then
+				local model, root, humanoid = character()
+				if move and not Mega.cauldronStand(generation, ready) then
+					return false
+				end
+				if not ready() or (root.Position - zone.Position).Magnitude > 10 then
+					return false
+				end
+				if model:GetAttribute("AllowEquipping") == false then
+					return false
+				end
+				humanoid:EquipTool(tool)
+				if not pause(0.15, generation) or not ready() or tool.Parent ~= model then
+					return false
+				end
+				if not App.event7.face(session, zone) then
+					return false
+				end
+				if not pause(0.1, generation) or not ready() then
+					EventInput.release(session)
+					return false
+				end
+				local before, name = counts[tool.Name], tool.Name
+				local sent = fire(getPath(Storage, "Remotes", "RequestDropItem"), tool, zone.Position)
+				EventInput.release(session)
+				if not sent then
+					return false
+				end
+				local credited = waitUntil(function()
+					if not active(generation) or not Mega.safe() or not zone.Parent or Mega.cauldron() ~= cauldron then
+						return true
+					end
+					local now, _, loaded = Mega.counts()
+					return loaded and now[name] > before
+				end, 3, generation)
+				local now, _, loaded = Mega.counts()
+				return credited ~= nil and active(generation) and loaded and now[name] > before
+			end
+		end
+		return false
+	end
+
+	function Mega.stir(session, generation, move, allowed)
+		local cauldron = Mega.cauldron()
+		local prompt = getPath(cauldron, "_Util", "InteractPart", "StirPrompt")
+		if not prompt or not prompt.Enabled then
+			return false
+		end
+		local part = App.event7.part(prompt.Parent)
+		if not part then
+			return false
+		end
+		if move and not Mega.cauldronStand(generation, Mega.safe) then
+			return false
+		end
+		return Mega.use(
+			session,
+			{ object = cauldron, part = part, prompt = prompt, kind = "stir" },
+			generation,
+			false,
+			session.stirMissed,
+			allowed
+		)
+	end
+
+	function Mega.progress()
+		if game.PlaceId ~= current.eventPlace then
+			return "Join a store round to start the quest"
+		end
+		local counts, _, known = Mega.counts()
+		if not known then
+			return Mega.cauldron() and "Checking candy totals" or "Finding the cauldron"
+		end
+		return string.format("Energy %d/6  |  Night %d/6  |  Health %d/6", counts.Candy1, counts.Candy2, counts.Candy3)
+	end
+
+	function Mega.pollBadge(session, generation)
+		if session.badgeBusy or os.clock() < (session.badgeAt or 0) then
+			return
+		end
+		session.badgeBusy, session.badgeAt = true, os.clock() + 15
+		task.spawn(function()
+			local ok, owned = pcall(verify, current, true)
+			if active(generation) and not session.closed then
+				session.badge = ok and owned == true
+			end
+			session.badgeBusy = false
+		end)
+	end
+
+	function Mega.explore(session, generation)
+		if os.clock() < (session.exploreAt or 0) then
+			return false
+		end
+		session.exploreAt = os.clock() + 4
+		local phase = getPath(Storage, "GameInfo", "TimeOfDay")
+		if not phase or not string.find(string.lower(tostring(phase.Value)), "night", 1, true) then
+			return false
+		end
+		local stock = getPath(Mega.util(), "StockAreas")
+		if not stock then
+			return false
+		end
+		local areas = {}
+		for _, area in ipairs(stock:GetChildren()) do
+			local part = App.event7.part(area)
+			if part and part.Position.Y > workspace.FallenPartsDestroyHeight + 32 then
+				local unique = true
+				for _, point in ipairs(areas) do
+					if (point - part.Position).Magnitude < 65 then
+						unique = false
+						break
+					end
+				end
+				if unique then
+					table.insert(areas, part.Position)
+				end
+				if #areas >= 16 then
+					break
+				end
+			end
+		end
+		if #areas == 0 then
+			return false
+		end
+		session.area = (session.area or 0) % #areas + 1
+		local point = areas[session.area]
+		status("Checking the store for chests", Mega.progress())
+		call("Mega store streaming", function()
+			if active(generation) then
+				App.player:RequestStreamAroundAsync(point, 0.5)
+			end
+		end, 0.8, generation)
+		Mega.cache = nil
+		if not active(generation) or #Mega.items() > 0 then
+			return true
+		end
+		Mega.move(point, generation, nil, function()
+			return Mega.safe() and Mega.clearance(point) > 28
+		end)
+		return true
+	end
+
+	function Mega.run(generation)
+		if game.PlaceId ~= current.eventPlace then
+			return false, "Join a store round, then press Start"
+		end
+		local session = { blocked = setmetatable({}, { __mode = "k" }), misses = setmetatable({}, { __mode = "k" }) }
+		Mega.session = session
+		if Mega.helper then
+			EventInput.release(Mega.helper)
+		end
+		table.insert(App.cleanups, function()
+			session.closed = true
+			EventInput.release(session)
+			if Mega.session == session then
+				Mega.session = nil
+			end
+			Mega.cache = nil
+		end)
+		local startAt, checkAt = 0, 0
+		while active(generation) do
+			Mega.pollBadge(session, generation)
+			if session.badge then
+				return true, "Tasty Brew badge earned"
+			end
+			local cauldron = Mega.cauldron()
+			local state = cauldron and cauldron:GetAttribute("CauldronState")
+			local stirPrompt = getPath(cauldron, "_Util", "InteractPart", "StirPrompt")
+			local counts, total, known = Mega.counts()
+			local inv, tools, slots = Mega.inventory()
+			local reward = Mega.reward()
+			local stored = 0
+			for _, name in ipairs(candyNames) do
+				stored += math.min(inv[name] or 0, 6 - counts[name])
+			end
+			if stored == 0 then
+				session.banking = false
+			end
+			if not Mega.ready() then
+				status("Waiting for the store", "Let the game finish loading or reviving", total / 18)
+			elseif Mega.evade(generation) then
+				status("Moving away from employees", Mega.progress(), total / 18)
+			elseif reward and os.clock() >= (session.blocked[reward.object] or 0) then
+				status("Picking up the brew", "Checking for the badge", total / 18)
+				Mega.use(session, reward, generation, true)
+				waitUntil(function()
+					return not reward.object:IsDescendantOf(workspace) or not Mega.safe()
+				end, 1.5, generation)
+				session.blocked[reward.object] = os.clock() + 3
+				if not reward.object:IsDescendantOf(workspace) then
+					session.badgeAt = 0
+				end
+			elseif stirPrompt and stirPrompt.Enabled and state ~= "Brewing" then
+				status("Stirring the cauldron", Mega.progress(), total / 18)
+				Mega.stir(session, generation, true)
+				session.stirMissed = true
+			elseif state == "Brewing" then
+				local began, duration = cauldron:GetAttribute("BrewStartedAt"), cauldron:GetAttribute("BrewTime")
+				local remaining = type(began) == "number"
+					and type(duration) == "number"
+					and math.max(0, math.ceil(began + duration - workspace:GetServerTimeNow()))
+				status(
+					"Brewing",
+					remaining and (remaining > 0 and remaining .. "s left" or "Checking for the finished brew")
+						or "The cauldron is brewing",
+					total / 18
+				)
+			elseif known and total >= 18 then
+				status("Ready to stir", "Checking the stir prompt", total / 18)
+				if os.clock() >= (session.cauldronAt or 0) then
+					session.cauldronAt = os.clock() + 3
+					Mega.cauldronStand(generation, Mega.safe)
+				end
+			elseif stored > 0 and (session.banking or slots >= 4 or total + stored >= 18) then
+				session.banking = true
+				status("Adding candy", Mega.progress(), total / 18)
+				Mega.deposit(session, generation, true)
+			else
+				local item, waiting = Mega.next(session)
+				if item then
+					local before = inv[item.object.Name] or 0
+					status(
+						item.kind == "candy" and "Picking up candy" or "Opening a pumpkin chest",
+						Mega.progress(),
+						total / 18
+					)
+					local used = Mega.use(session, item, generation, true, (session.misses[item.object] or 0) > 0)
+					local changed = used
+					if item.kind ~= "chest" then
+						waitUntil(function()
+							if not Mega.safe() or not item.object:IsDescendantOf(workspace) then
+								return true
+							end
+							local now = Mega.inventory()
+							return (now[item.object.Name] or 0) > before
+						end, 1.8, generation)
+						local now = Mega.inventory()
+						changed = not item.object:IsDescendantOf(workspace) or (now[item.object.Name] or 0) > before
+					end
+					session.misses[item.object] = changed and 0 or (session.misses[item.object] or 0) + 1
+					session.blocked[item.object] = os.clock() + (changed and 4 or 1)
+				elseif stored > 0 then
+					session.banking = true
+					status("Adding candy", Mega.progress(), total / 18)
+					Mega.deposit(session, generation, true)
+				elseif waiting then
+					status(
+						slots >= 5 and "Make room in your hotbar" or "Retrying the candy pickup",
+						waiting,
+						total / 18
+					)
+				else
+					local prompt = getPath(Mega.util(), "StartGamePart", "ProximityPrompt")
+					local round = getPath(Storage, "GameInfo", "Round")
+					if prompt and prompt.Enabled and round and round.Value == 0 and os.clock() >= startAt then
+						startAt = os.clock() + 8
+						status("Entering the store", "", 0)
+						Mega.use(
+							session,
+							{ object = prompt.Parent, part = prompt.Parent, prompt = prompt },
+							generation,
+							true
+						)
+					elseif not Mega.explore(session, generation) then
+						status(
+							slots >= 5 and "Make room in your hotbar" or "Waiting for candy or pumpkin chests",
+							"Chests open at night. ESP works without Start.",
+							total / 18
+						)
+					end
+					if os.clock() >= checkAt then
+						checkAt = os.clock() + 6
+						Mega.cache = nil
+					end
+				end
+			end
+			pause(0.35, generation)
+		end
+		return false, "Stopped"
+	end
+
+	-- manual assist
+	function Mega.assistOnce(session)
+		local function allowed()
+			return Mega.assist and not App.running and not session.closed
+		end
+		if not allowed() or not Mega.safe() then
+			return
+		end
+		local _, root = character()
+		local camera = workspace.CurrentCamera
+		local function looking(part)
+			local delta = part.Position - camera.CFrame.Position
+			return (root.Position - part.Position).Magnitude <= 8
+				and delta.Magnitude > 0.1
+				and camera.CFrame.LookVector:Dot(delta.Unit) > 0.92
+		end
+		local prompt = getPath(Mega.cauldron(), "_Util", "InteractPart", "StirPrompt")
+		if prompt and prompt.Enabled and looking(prompt.Parent) then
+			Mega.stir(session, nil, false, allowed)
+			return
+		end
+		local zone = getPath(Mega.cauldron(), "_Util", "IngredientZone")
+		if zone and zone:IsA("BasePart") and looking(zone) then
+			if Mega.deposit(session, nil, false, allowed) then
+				return
+			end
+		end
+		for _, item in ipairs(Mega.items()) do
+			if looking(item.part) then
+				Mega.use(session, item, nil, false, session.retry, allowed)
+				session.retry = true
+				return
+			end
+		end
+	end
+
+	function Mega.toggleAssist()
+		Mega.assist = not Mega.assist
+		if Mega.helper then
+			Mega.helper.closed = true
+			EventInput.release(Mega.helper)
+			Mega.helper = nil
+		end
+		refresh()
+		if not Mega.assist then
+			return
+		end
+		local session = {}
+		Mega.helper = session
+		task.spawn(function()
+			while App.alive and Mega.assist and Mega.helper == session do
+				pcall(Mega.assistOnce, session)
+				task.wait(0.75)
+			end
+			EventInput.release(session)
+		end)
+	end
+
+	function Mega.clear()
+		Mega.assist, Mega.cache = false, nil
+		if Mega.helper then
+			Mega.helper.closed = true
+			EventInput.release(Mega.helper)
+			Mega.helper = nil
+		end
+	end
+
+	function Mega.watch()
+		if Mega.watching then
+			return
+		end
+		Mega.watching = true
+		task.spawn(function()
+			while App.alive do
+				pcall(refresh)
+				task.wait(0.75)
+			end
+		end)
+	end
+
+	App.mega = Mega
+	runners.mega = Mega.run
+end
+
 local function start()
 	if App.running or App.traveling or not App.player or not current then
 		return
@@ -26478,6 +27561,7 @@ local function start()
 						or current.id == "home"
 						or current.id == "banana"
 						or current.id == "shawarma"
+						or current.id == "mega"
 						or character()
 					)
 			end, 25, generation)
@@ -26936,15 +28020,41 @@ local function buildUI(parent)
 			end)
 		end)
 	end
-	if current and (current.id == "banana" or current.id == "shawarma" or current.id == "hollow") then
+	if
+		current
+		and (current.id == "banana" or current.id == "shawarma" or current.id == "hollow" or current.id == "mega")
+	then
 		local title = current.id == "banana"
 				and (game.PlaceId == 105438027287525 and "Cake + reward ESP" or "Keys / exits / Banana ESP")
 			or current.id == "shawarma" and "Hollow task ESP"
+			or current.id == "mega" and "Candy / chests / employee ESP"
 			or "Torch + pumpkin ESP"
 		ui.event7Title = title
 		ui.event7Markers = button(event, title, UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
 			App.event7.toggleMarkers()
 		end)
+		if current.id == "mega" then
+			ui.megaAssist = button(
+				event,
+				"Nearby prompt assist: OFF",
+				UDim2.fromOffset(0, 0),
+				UDim2.new(1, -8, 0, 44),
+				function()
+					App.mega.toggleAssist()
+				end
+			)
+			ui.megaProgress =
+				label(event, App.mega.progress(), UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 40), 12, colors.muted)
+			App.mega.watch()
+			label(
+				event,
+				"Look at nearby candy, chests or the cauldron to use assist. Start runs the full route.",
+				UDim2.fromOffset(0, 0),
+				UDim2.new(1, -8, 0, 60),
+				12,
+				colors.muted
+			)
+		end
 		if current.id == "shawarma" then
 			button(event, "Vote yes for The Hollow", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
 				local remote = getPath(workspace, "Halloween", "Voids", "VoidScript", "TheHollowVoteRemote")
@@ -27106,6 +28216,13 @@ local function buildUI(parent)
 			setProperty(ui.event7Markers, "Text", ui.event7Title .. (enabled and ": ON" or ": OFF"))
 			setProperty(ui.event7Markers, "BackgroundColor3", enabled and colors.mint or colors.raised)
 			setProperty(ui.event7Markers, "TextColor3", enabled and colors.base or colors.text)
+		end
+		if ui.megaAssist then
+			local enabled = App.mega.assist == true
+			setProperty(ui.megaAssist, "Text", "Nearby prompt assist: " .. (enabled and "ON" or "OFF"))
+			setProperty(ui.megaAssist, "BackgroundColor3", enabled and colors.mint or colors.raised)
+			setProperty(ui.megaAssist, "TextColor3", enabled and colors.base or colors.text)
+			setProperty(ui.megaProgress, "Text", App.mega.progress())
 		end
 		if ui.floor then
 			setProperty(ui.floor, "Text", tostring(App.floor))
@@ -27411,6 +28528,9 @@ App.unload = function()
 	App.running = false
 	if App.event7 then
 		pcall(App.event7.clear)
+	end
+	if App.mega then
+		pcall(App.mega.clear)
 	end
 	if App.releaseUI then
 		pcall(App.releaseUI)
