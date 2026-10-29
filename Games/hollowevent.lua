@@ -4,6 +4,24 @@ local Logic = {}
 
 Logic.games = {
 	{
+		id = "killer",
+		name = "Survive the Killer",
+		place = 4580204640,
+		universe = 1489026993,
+		badges = { 1422720860130740 },
+		objective = "Find the band's three instruments and return them",
+	},
+	{
+		id = "sonariaescape",
+		name = "Sonaria Horror Escape",
+		place = 130929507719087,
+		eventPlace = 111902511656171,
+		alternatePlaces = { 111902511656171 },
+		universe = 9442472087,
+		badges = { 1876171999687485 },
+		objective = "Clear six Hollow rounds and defeat the boss",
+	},
+	{
 		id = "mega",
 		name = "Survive Overnight in a Mega Store",
 		place = 127380660530951,
@@ -16,7 +34,7 @@ Logic.games = {
 		id = "hollow",
 		name = "The Hollow",
 		place = 116463962153167,
-		objective = "Clear floors 1-7 and bring the relic back",
+		objective = "Clear floors 1-8 and bring the relic back",
 	},
 	{
 		id = "shawarma",
@@ -3131,8 +3149,8 @@ local function runHollow(generation)
 		floor = maze
 		App.floor = floor
 	end
-	if floor ~= 1 and floor ~= 2 and floor ~= 3 and floor ~= 4 and floor ~= 5 and floor ~= 6 and floor ~= 7 then
-		return false, "Choose a floor from 1 to 7"
+	if floor ~= 1 and floor ~= 2 and floor ~= 3 and floor ~= 4 and floor ~= 5 and floor ~= 6 and floor ~= 7 and floor ~= 8 then
+		return false, "Choose a floor from 1 to 8"
 	end
 	local loaded = waitUntil(function()
 		return App.player:FindFirstChild("Loaded")
@@ -3144,6 +3162,7 @@ local function runHollow(generation)
 		or floor == 5 and Bridge.mirrorsCompleted()
 		or floor == 6 and Bridge.brewCompleted()
 		or floor == 7 and Bridge.lanternsCompleted()
+		or floor == 8 and Bridge.offeringsCompleted()
 	if completed and not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true then
 		return true, "Floor " .. floor .. " has already been completed"
 	end
@@ -3185,7 +3204,14 @@ local function runHollow(generation)
 	if not pause(2, generation) then
 		return false, "Stopped"
 	end
-	if floor == 7 then
+	if floor == 8 then
+		if not completed and App.player:GetAttribute("HasRelic") ~= true then
+			local solved, solveError = Bridge.solveOfferings(objects, clientState, generation)
+			if not solved then
+				return false, solveError
+			end
+		end
+	elseif floor == 7 then
 		if not completed and App.player:GetAttribute("HasRelic") ~= true then
 			local solved, solveError = Bridge.solveLanterns(objects, clientState, generation)
 			if not solved then
@@ -3365,13 +3391,14 @@ local function runHollow(generation)
 		return false, returnError
 	end
 	if
-		(floor == 4 or floor == 5 or floor == 6 or floor == 7)
+		(floor == 4 or floor == 5 or floor == 6 or floor == 7 or floor == 8)
 		and not waitUntil(function()
 			return (
 				floor == 4 and Bridge.completed()
 				or floor == 5 and Bridge.mirrorsCompleted()
 				or floor == 6 and Bridge.brewCompleted()
 				or floor == 7 and Bridge.lanternsCompleted()
+				or floor == 8 and Bridge.offeringsCompleted()
 			)
 				and not App.player:GetAttribute("InMaze")
 				and App.player:GetAttribute("HasRelic") ~= true
@@ -5348,54 +5375,96 @@ local function duelsMode()
 end
 
 local function duelsRoster(session, id, generation)
+	if session.rosterMatch == id and session.roster and os.clock() < (session.nextRosterScan or 0) then
+		return session.roster
+	end
+	session.rosterMatch, session.nextRosterScan = id, os.clock() + 0.15
 	local roster = table.clone(Players:GetPlayers())
-	if os.clock() >= (session.nextBotScan or 0) then
-		session.nextBotScan = os.clock() + 0.25
-		if not session.botPlayers and os.clock() >= (session.nextBotModule or 0) then
+	local entries, observed = {}, false
+	local folder = getPath(Storage, "ActiveMatches", id, "Bots")
+	if folder then
+		observed = true
+		for _, info in ipairs(folder:GetChildren()) do
+			if info:IsA("Folder") then
+				table.insert(
+					entries,
+					{
+						proxy = info,
+						userId = info:GetAttribute("UserId"),
+						name = info:GetAttribute("BotName") or info.Name,
+					}
+				)
+			end
+		end
+	else
+		if not session.botPlayers and not session.botLoading and os.clock() >= (session.nextBotModule or 0) then
 			session.nextBotModule = os.clock() + 2
 			local object = getPath(Storage, "Shared", "BotPlayers")
 			if object then
-				session.botPlayers = module(object, generation)
+				session.botLoading = true
+				task.spawn(function()
+					local value = module(object, generation)
+					if active(generation) and not session.closed then
+						session.botPlayers, session.botLoading = value, nil
+						session.nextRosterScan = 0
+					end
+				end)
 			end
 		end
 		local bots = session.botPlayers
-		local characters = bots and workspace:FindFirstChild("Characters")
 		local ok, proxies = false, nil
 		if bots and type(bots.GetBotProxies) == "function" then
 			ok, proxies = pcall(bots.GetBotProxies, id)
 		end
-		local targets = {}
-		if ok and type(proxies) == "table" and characters then
-			local models = {}
-			for _, model in ipairs(characters:GetChildren()) do
-				if model:IsA("Model") then
-					local userId = model:GetAttribute("BotUserId")
-					if type(userId) == "number" and userId < 0 then
+		if ok and type(proxies) == "table" then
+			observed = true
+			for _, proxy in ipairs(proxies) do
+				if type(proxy) == "table" and type(proxy.GetAttribute) == "function" then
+					table.insert(entries, { proxy = proxy, userId = proxy.UserId, name = proxy.Name })
+				end
+			end
+		end
+	end
+	if observed then
+		local characters = workspace:FindFirstChild("Characters")
+		local models, targets = {}, {}
+		for _, model in ipairs(characters and characters:GetChildren() or {}) do
+			if model:IsA("Model") and model:GetAttribute("PracticeNPC") ~= true and not model:GetAttribute("Decoy") then
+				local userId = model:GetAttribute("BotUserId")
+				local matchId = model:GetAttribute("MatchId")
+				if
+					type(userId) == "number"
+					and userId == userId
+					and userId ~= 0
+					and (matchId == nil or matchId == id)
+				then
+					if not models[userId] or model:GetAttribute("BotMatchBot") == true then
 						models[userId] = model
 					end
 				end
 			end
-			for _, proxy in ipairs(proxies) do
-				local model = type(proxy) == "table" and models[proxy.UserId]
-				if not model or type(proxy.GetAttribute) ~= "function" then
-					continue
-				end
-				local target = session.botTargets and session.botTargets[proxy.UserId]
-				if not target or target.proxy ~= proxy then
-					target = { UserId = proxy.UserId, proxy = proxy, _hollowBot = true }
-					target.GetAttribute = function(self, name)
-						if name == "InMatch" then
-							return true
-						end
-						if name == "MatchId" then
-							return self.matchId
-						end
-						return self.proxy:GetAttribute(name)
-					end
-				end
-				target.Character, target.matchId = model, id
-				targets[proxy.UserId] = target
+		end
+		for _, entry in ipairs(entries) do
+			local userId, proxy = entry.userId, entry.proxy
+			if type(userId) ~= "number" or userId ~= userId or userId == 0 then
+				continue
 			end
+			local target = session.botTargets and session.botTargets[userId]
+			if not target then
+				target = { UserId = userId, _hollowBot = true }
+				target.GetAttribute = function(self, name)
+					local value = self.proxy:GetAttribute(name)
+					if name == "InMatch" and value == nil then
+						return true
+					end
+					if name == "MatchId" and value == nil then
+						return self.matchId
+					end
+					return value
+				end
+			end
+			target.proxy, target.Character, target.matchId, target.Name = proxy, models[userId], id, entry.name
+			targets[userId] = target
 		end
 		session.botTargets = targets
 	end
@@ -5404,6 +5473,11 @@ local function duelsRoster(session, id, generation)
 			table.insert(roster, target)
 		end
 	end
+	session.rosterMembers = {}
+	for _, player in ipairs(roster) do
+		session.rosterMembers[player] = true
+	end
+	session.roster = roster
 	return roster
 end
 
@@ -5491,7 +5565,7 @@ local function teleportDuels(session, model, root, humanoid, opponent, part, rea
 		return false, "Checking the match"
 	end
 	if session.followPart ~= part then
-		session.followPart, session.lastTeleport = part, nil
+		session.followPart, session.lastTeleport, session.landingCursor, session.lastLanding = part, nil, 0, nil
 	end
 	if os.clock() - (session.lastTeleport or -math.huge) < 0.04 then
 		return false, "Following the target"
@@ -5508,7 +5582,11 @@ local function teleportDuels(session, model, root, humanoid, opponent, part, rea
 		return false, "The target is outside the playable map"
 	end
 	local excluded = { model }
-	for _, player in ipairs(Players:GetPlayers()) do
+	local characters = workspace:FindFirstChild("Characters")
+	if characters then
+		table.insert(excluded, characters)
+	end
+	for _, player in ipairs(session.roster or Players:GetPlayers()) do
 		if player.Character and player.Character ~= model then
 			table.insert(excluded, player.Character)
 		end
@@ -5524,10 +5602,13 @@ local function teleportDuels(session, model, root, humanoid, opponent, part, rea
 		back = back.Unit
 	end
 	local right = Vector3.new(back.Z, 0, -back.X)
-	local offsets = { back * 4, back * 3.8 + right, back * 3.8 - right }
+	local offsets =
+		{ back * 4, back * 3.8 + right, back * 3.8 - right, back * 3.8 + right * 1.8, back * 3.8 - right * 1.8 }
 	local height = math.max(2.6, humanoid.HipHeight + root.Size.Y / 2)
 	local destination
-	for _, offset in ipairs(offsets) do
+	for step = 1, #offsets do
+		local index = ((session.landingCursor or 0) + step - 1) % #offsets + 1
+		local offset = offsets[index]
 		local hit = workspace:Raycast(position + offset + Vector3.new(0, 3, 0), Vector3.new(0, -12, 0), params)
 		if
 			hit
@@ -5538,19 +5619,18 @@ local function teleportDuels(session, model, root, humanoid, opponent, part, rea
 			local candidate = hit.Position + Vector3.new(0, height, 0)
 			local toward = Vector3.new(position.X, candidate.Y, position.Z) - candidate
 			if
-				math.abs(candidate.Y - position.Y) <= 3
+				math.abs(candidate.Y - position.Y) <= 12
 				and toward.Magnitude > 0.1
 				and not workspace:Raycast(candidate, toward, params)
 				and not workspace:Raycast(candidate, Vector3.new(0, 3, 0), params)
 			then
 				destination = candidate
+				session.lastLanding = index
 				break
 			end
 		end
 	end
 	if not destination then
-		session.unreachable = session.unreachable or {}
-		session.unreachable[opponent] = os.clock() + 0.25
 		return false, "No safe ground behind the target"
 	end
 	if not ready() then
@@ -5633,42 +5713,83 @@ local function stepDuels(session, generation)
 		return false, "Equipping " .. wanted .. ", waiting for it to equip"
 	end
 	session.selectedTool = tool
+	local roster = duelsRoster(session, id, generation)
 	local function valid(player)
-		local otherId, otherSide = duelsLive(player, session)
+		if player == App.player or not session.rosterMembers[player] then
+			return nil, nil, true
+		end
+		local otherId, otherSide = player:GetAttribute("MatchId"), player:GetAttribute("MatchSide")
+		if
+			player:GetAttribute("Alive") == false
+			or player:GetAttribute("InMatch") == false
+			or player:GetAttribute("Spectating")
+			or otherId ~= nil and otherId ~= id
+			or otherSide ~= nil and otherSide == side
+		then
+			return nil, nil, true
+		end
 		local other = player.Character
 		local part = other and other:FindFirstChild("HumanoidRootPart")
 		local health = other and other:FindFirstChildOfClass("Humanoid")
-		return player ~= App.player
-			and otherId == id
-			and otherSide ~= side
-			and part
-			and health
-			and health.Health > 0
-			and (type(player) ~= "table" or not player._hollowBot or other:IsDescendantOf(workspace))
-			and not other:FindFirstChildOfClass("ForceField")
-			and (not session.unreachable or (session.unreachable[player] or 0) <= os.clock())
-			and part
+		if health and health.Health <= 0 then
+			return nil, nil, true
+		end
+		if otherId ~= id or otherSide ~= "A" and otherSide ~= "B" then
+			return nil, "Waiting for the opponent's match data"
+		end
+		if
+			not part
+			or not health
+			or type(player) == "table" and player._hollowBot and not other:IsDescendantOf(workspace)
+		then
+			return nil, "Waiting for the opponent's character"
+		end
+		if other:FindFirstChildOfClass("ForceField") then
+			return part, "Waiting for spawn protection to end"
+		end
+		return part
 	end
 	local opponent = session.target
-	local part = opponent and valid(opponent)
-	if not part and (opponent or os.clock() >= (session.nextScan or 0)) then
-		session.target, session.nextScan = nil, os.clock() + 0.1
-		local distance
-		for _, player in ipairs(duelsRoster(session, id, generation)) do
-			local candidate = valid(player)
+	if session.targetMatch and session.targetMatch ~= id then
+		opponent = nil
+		session.target = nil
+	end
+	local part, targetWait, removed
+	if opponent then
+		part, targetWait, removed = valid(opponent)
+	end
+	if removed then
+		session.target, opponent = nil, nil
+	end
+	if not opponent then
+		local distance, pending
+		for _, player in ipairs(roster) do
+			local candidate, why, gone = valid(player)
 			local length = candidate and (candidate.Position - root.Position).Magnitude
-			if length and (not distance or length < distance) then
+			if length and not why and (not distance or length < distance) then
 				session.target, distance = player, length
+			elseif
+				not gone
+				and not pending
+				and player:GetAttribute("MatchId") == id
+				and player:GetAttribute("MatchSide") ~= side
+			then
+				pending = player
 			end
 		end
+		session.target = session.target or pending
+		session.targetMatch = id
 		opponent = session.target
-		part = opponent and valid(opponent)
+		if opponent then
+			part, targetWait = valid(opponent)
+		end
 	end
-	if not part then
-		return idle("Looking for an enemy")
+	if not part or targetWait then
+		return idle(targetWait or "Waiting for the opponent to spawn")
 	end
 	local function ready()
 		local latestId, latestSide = duelsLive(App.player, session)
+		local currentPart, blocked = valid(opponent)
 		return active(generation)
 			and not session.closed
 			and duelsMode() == mode
@@ -5685,7 +5806,8 @@ local function stepDuels(session, generation)
 			and App.player:GetAttribute("BackpackEnabled") == true
 			and latestId == id
 			and latestSide == side
-			and valid(opponent) == part
+			and currentPart == part
+			and not blocked
 	end
 	local _, moveReason = teleportDuels(session, model, root, humanoid, opponent, part, ready)
 	if not ready() then
@@ -5723,10 +5845,7 @@ local function stepDuels(session, generation)
 	params.FilterType, params.FilterDescendantsInstances = Enum.RaycastFilterType.Exclude, { model, opponent.Character }
 	params.RespectCanCollide = true
 	if difference.Magnitude < 0.01 or workspace:Raycast(origin, difference, params) then
-		if mode == "Gun" then
-			session.unreachable = session.unreachable or {}
-			session.unreachable[opponent] = os.clock() + 0.25
-		end
+		session.landingCursor = session.lastLanding or 0
 		return idle("Waiting for a clear " .. wanted .. " attack")
 	end
 	if not ready() then
@@ -5922,6 +6041,10 @@ local function runDuels(generation)
 				if state.t ~= "RoundLive" then
 					releaseDuelsTool(session)
 				end
+				if state.t == "RoundEnded" or state.t == "MatchEnded" then
+					session.target, session.targetMatch = nil, nil
+				end
+				session.nextRosterScan = 0
 			end
 		end
 	end)
@@ -6021,7 +6144,6 @@ local function runDuels(generation)
 				releaseDuelsTool(session)
 				session.currentMode, session.combatDisabled, session.combatReason = mode, false, nil
 				session.followPart, session.lastTeleport, session.nextScan = nil, nil, 0
-				session.target, session.unreachable = nil, nil
 				combatErrors = 0
 			end
 			if mode ~= "Off" and not session.combatDisabled then
@@ -27641,6 +27763,1069 @@ local function button(parent, text, position, size, callback)
 	return object
 end
 
+-- offerings + day 8
+do
+	(function()
+		local Day8 = { markers = false, skills = true, bossAim = true, modules = {} }
+		local instruments = {
+			{ item = "flotsam_guitar", member = "Flotsam Direwick", attribute = "TheHollowGuitar", title = "Guitar" },
+			{ item = "malvus_drumsticks", member = "Malvus", attribute = "TheHollowDrumsticks", title = "Drumsticks" },
+			{ item = "siren_head_keys", member = "Siren Head", attribute = "TheHollowKeys", title = "Keys" },
+		}
+
+		function Day8.part(object)
+			return App.event7.part(object)
+		end
+
+		function Day8.nearest(items)
+			local _, root = character()
+			if not root then
+				return nil
+			end
+			local best, length
+			for _, item in ipairs(items) do
+				if item.part and item.part.Parent then
+					local distance = (root.Position - item.part.Position).Magnitude
+					if not length or distance < length then
+						best, length = item, distance
+					end
+				end
+			end
+			return best, length
+		end
+
+		function Day8.load(name, generation)
+			if Day8.modules[name] then
+				return Day8.modules[name]
+			end
+			local object = Storage:FindFirstChild("Sonar")
+			local loader = object and module(object, generation)
+			if type(loader) ~= "function" then
+				return nil
+			end
+			local ok, value = call("Sonaria " .. name, function()
+				return loader(name)
+			end, 8, generation)
+			if ok and type(value) == "table" and active(generation) then
+				Day8.modules[name] = value
+				return value
+			end
+		end
+
+		function Day8.hollowState()
+			local puzzle = Day8.offerings
+			local state = puzzle and type(puzzle.getState) == "function" and puzzle.getState()
+			return type(state) == "table" and type(state.Needs) == "table" and type(state.Placed) == "table" and state
+				or nil
+		end
+
+		function Day8.altar(generation)
+			local entries = {}
+			for _, object in ipairs(Collection:GetTagged("%OfferingAltar")) do
+				local part = Day8.part(object)
+				if part then
+					table.insert(entries, { object = object, part = part })
+				end
+			end
+			local altar = Day8.nearest(entries)
+			return altar
+				and approach(altar.part.Position, generation, altar.object, false, function()
+					return active(generation) and App.player:GetAttribute("InMaze") == 8
+				end)
+		end
+
+		function Day8.pedestals(state)
+			local items = {}
+			if not state then
+				return items
+			end
+			for _, object in ipairs(Collection:GetTagged("%OfferingPedestal")) do
+				local key = object:GetAttribute(tostring(App.player.UserId))
+				key = key ~= nil and tostring(key) or nil
+				local part = Day8.part(object)
+				if part and key and state.Needs[key] and not state.Placed[key] then
+					table.insert(items, {
+						object = object,
+						part = part,
+						key = key,
+						item = state.Needs[key],
+						title = tostring(state.Needs[key]),
+					})
+				end
+			end
+			return items
+		end
+
+		function Bridge.offeringsCompleted()
+			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+				if tonumber(number) == 8 then
+					return true
+				end
+			end
+			return false
+		end
+
+		function Bridge.solveOfferings(_, _, generation)
+			for _, name in ipairs({ "OfferingsPuzzle", "OfferingAltar", "OfferingPedestal" }) do
+				local value, reason = hollowModule(name, generation)
+				if not value then
+					return false, reason
+				end
+				if name == "OfferingsPuzzle" then
+					Day8.offerings = value
+				end
+			end
+			local session, missingAt = {}, os.clock()
+			table.insert(App.cleanups, function()
+				EventInput.release(session)
+			end)
+			while active(generation) and App.player:GetAttribute("InMaze") == 8 do
+				if App.player:GetAttribute("HasRelic") == true then
+					return true
+				end
+				local state, model = Day8.hollowState(), character()
+				if not state or not model then
+					status("Loading the offerings", "Waiting for your altar and pedestal list", 0.15)
+				elseif state.Solved then
+					status("Offerings placed", "Waiting for the relic", 0.85)
+				else
+					local holding = Day8.offerings.holding()
+					local pending = Day8.pedestals(state)
+					local placed, total = 0, 0
+					for key in pairs(state.Needs) do
+						total += 1
+						if state.Placed[key] then
+							placed += 1
+						end
+					end
+					status(
+						"Placing the offerings",
+						string.format("%d / %d placed", placed, total),
+						0.2 + 0.6 * placed / math.max(1, total)
+					)
+					local target
+					if holding then
+						local matching = {}
+						for _, entry in ipairs(pending) do
+							if entry.item == holding then
+								table.insert(matching, entry)
+							end
+						end
+						target = Day8.nearest(matching)
+						if target then
+							local function allowed()
+								return active(generation)
+									and App.player.Character == model
+									and App.player:GetAttribute("InMaze") == 8
+									and Day8.offerings.holding() == holding
+									and target.object:IsDescendantOf(workspace)
+							end
+							if approach(target.part.Position, generation, target.object, false, allowed) then
+								waitUntil(function()
+									local now = Day8.hollowState()
+									return now and now.Placed[target.key] or not allowed()
+								end, 4, generation)
+							end
+						end
+					else
+						target = Day8.nearest(pending)
+					end
+					if target and not holding then
+						if Day8.altar(generation) and active(generation) then
+							Day8.offerings.useAltarItem(target.item)
+							waitUntil(function()
+								return Day8.offerings.holding() ~= nil or not active(generation)
+							end, 4, generation)
+						end
+					elseif holding and not target then
+						status("Returning the extra offering", tostring(holding), App.progress)
+						if Day8.altar(generation) and active(generation) then
+							Day8.offerings.useAltarItem(holding)
+							waitUntil(function()
+								return Day8.offerings.holding() ~= holding
+							end, 4, generation)
+						end
+					end
+					if target then
+						missingAt = os.clock()
+					end
+				end
+				if os.clock() - missingAt > 35 then
+					local hint = nearest("%OfferingAltar") or nearest("%OfferingPedestal")
+					if hint then
+						approach(positionOf(hint), generation, hint)
+					end
+					missingAt = os.clock()
+				end
+				if not pause(0.25, generation) then
+					break
+				end
+			end
+			return false, active(generation) and "The floor changed" or "Stopped"
+		end
+
+		-- instruments
+		function Day8.team(player)
+			return player:GetAttribute("TeamID") or player.Team and player.Team.Name
+		end
+
+		function Day8.killerItems()
+			local result = {}
+			for _, object in ipairs(Collection:GetTagged("Collectable")) do
+				local id = object:GetAttribute("CollectableID") or object.Name
+				for _, spec in ipairs(instruments) do
+					if spec.item == id and App.player:GetAttribute(spec.attribute) ~= true then
+						local part = Day8.part(object)
+						if part then
+							table.insert(result, { object = object, part = part, title = spec.title, spec = spec })
+						end
+					end
+				end
+			end
+			return result
+		end
+
+		function Day8.members()
+			local result = {}
+			for _, object in ipairs(Collection:GetTagged("LobbyStage")) do
+				for _, spec in ipairs(instruments) do
+					local member = object:FindFirstChild(spec.member, true)
+					local part = member and Day8.part(member)
+					if part then
+						table.insert(result, { object = member, part = part, title = spec.member, spec = spec })
+					end
+				end
+			end
+			return result
+		end
+
+		function Day8.killerThreats()
+			local result = {}
+			for _, player in ipairs(Players:GetPlayers()) do
+				local model = player ~= App.player and player.Character
+				local humanoid = model and model:FindFirstChildOfClass("Humanoid")
+				local part = model and Day8.part(model)
+				if part and humanoid and humanoid.Health > 0 and Day8.team(player) == "Killer" then
+					table.insert(result, { object = model, part = part, title = "Killer", threat = true })
+				end
+			end
+			return result
+		end
+
+		function Day8.ready(generation)
+			local model, root, humanoid = character()
+			local camera = workspace.CurrentCamera
+			return active(generation)
+				and model
+				and root
+				and humanoid
+				and not root.Anchored
+				and humanoid.Health > 0
+				and not App.cameraBusy
+				and camera
+				and camera.CameraType ~= Enum.CameraType.Scriptable
+				and App.player:GetAttribute("Downed") ~= true
+		end
+
+		function Day8.clearance(point, threats)
+			local closest = math.huge
+			for _, entry in ipairs(threats) do
+				if entry.part.Parent then
+					closest = math.min(closest, (point - entry.part.Position).Magnitude)
+				end
+			end
+			return closest
+		end
+
+		function Day8.evade(session, threats, generation)
+			local _, root = character()
+			if not root or not Day8.ready(generation) then
+				return false
+			end
+			local currentGap = Day8.clearance(root.Position, threats)
+			if currentGap >= 24 or os.clock() < (session.evadeAt or 0) then
+				return false
+			end
+			session.evadeAt = os.clock() + 1.5
+			local params = RaycastParams.new()
+			params.FilterType, params.RespectCanCollide = Enum.RaycastFilterType.Exclude, true
+			local excluded = { App.player.Character }
+			for _, entry in ipairs(threats) do
+				table.insert(excluded, entry.object)
+			end
+			params.FilterDescendantsInstances = excluded
+			local best, score
+			for _, radius in ipairs({ 28, 45 }) do
+				for angle = 0, 7 do
+					local offset = Vector3.new(math.cos(angle * math.pi / 4), 0, math.sin(angle * math.pi / 4)) * radius
+					local hit = workspace:Raycast(
+						root.Position + offset + Vector3.new(0, 10, 0),
+						Vector3.new(0, -22, 0),
+						params
+					)
+					if
+						hit
+						and hit.Normal.Y > 0.7
+						and math.abs(hit.Position.Y - root.Position.Y) < 12
+						and hit.Position.Y > workspace.FallenPartsDestroyHeight + 32
+					then
+						local gap = Day8.clearance(hit.Position, threats)
+						if gap > currentGap + 10 and (not score or gap > score) then
+							best, score = hit.Position, gap
+						end
+					end
+				end
+			end
+			return best
+					and approach(best, generation, nil, false, function()
+						return Day8.ready(generation)
+					end, { streamSeconds = 0.2, streamWait = 0.3, settleSeconds = 0.12 })
+				or false
+		end
+
+		function Day8.vote(network, session)
+			if workspace:GetAttribute("GameState") ~= 3 then
+				session.vote = nil
+				return
+			end
+			for index = 1, 4 do
+				local tile = "Map" .. index
+				if workspace:GetAttribute("MapVoting_" .. tile) == "Happy Neighborhood" and session.vote ~= tile then
+					network:FireServer("MapVote", tile)
+					session.vote = tile
+					return
+				end
+			end
+		end
+
+		function Day8.killerExits()
+			local exits = {}
+			for _, object in ipairs(Collection:GetTagged("Exit")) do
+				local trigger = object:FindFirstChild("Trigger", true)
+				if trigger and trigger:IsA("BasePart") and object:GetAttribute("Open") == true then
+					table.insert(exits, { object = object, part = trigger, title = "Open exit" })
+				end
+			end
+			return exits
+		end
+
+		function Day8.scout(session, generation)
+			if workspace:GetAttribute("Map") ~= "Happy Neighborhood" or os.clock() < (session.searchAt or 0) then
+				return
+			end
+			session.searchAt = os.clock() + 4
+			local map = workspace:FindFirstChild("Happy Neighborhood")
+			if not map then
+				return
+			end
+			local spawns = map:FindFirstChild("SurvivorSpawns")
+			local points = {}
+			for _, object in ipairs(spawns and spawns:GetChildren() or {}) do
+				local part = Day8.part(object)
+				if part then
+					table.insert(points, part)
+				end
+			end
+			table.sort(points, function(a, b)
+				return a.Name < b.Name
+			end)
+			if #points == 0 then
+				return
+			end
+			session.searchIndex = (session.searchIndex or 0) % #points + 1
+			local point = points[session.searchIndex]
+			approach(point.Position, generation, nil, false, function()
+				return Day8.ready(generation)
+					and Day8.team(App.player) == "Survivor"
+					and not App.player:GetAttribute("Collectable")
+					and #Day8.killerItems() == 0
+			end)
+		end
+
+		function Day8.pickup(session, entry, generation)
+			if not Day8.ready(generation) then
+				return false
+			end
+			local model = App.player.Character
+			local function allowed()
+				return Day8.ready(generation)
+					and App.player.Character == model
+					and entry.object:IsDescendantOf(workspace)
+			end
+			if not approach(entry.part.Position, generation, entry.object, false, allowed) or not allowed() then
+				return false
+			end
+			if App.player:GetAttribute("Collectable") == entry.spec.item then
+				return true
+			end
+			local prompt = entry.object:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt and prompt.Enabled then
+				return EventInput.hold(session, prompt, generation, allowed, {
+					accepted = function()
+						return App.player:GetAttribute("Collectable") == entry.spec.item
+					end,
+				})
+			end
+			App.event7.face(session, entry.part)
+			EventInput.tap(session, generation, Enum.KeyCode.E)
+			EventInput.release(session)
+			return waitUntil(function()
+				return App.player:GetAttribute("Collectable") == entry.spec.item or not allowed()
+			end, 1.5, generation) ~= nil and App.player:GetAttribute("Collectable") == entry.spec.item
+		end
+
+		function Day8.runKiller(generation)
+			local load = module(Storage:FindFirstChild("Load"), generation)
+			local network = waitUntil(function()
+				load = load or module(Storage:FindFirstChild("Load"), generation)
+				local ok, value = false, nil
+				if type(load) == "function" then
+					ok, value = call("Killer network", function()
+						return load("Network")
+					end, 8, generation)
+				end
+				return ok and type(value) == "table" and value
+			end, 30, generation)
+			if not network then
+				return false, "The game controls haven't loaded yet"
+			end
+			local session = { retry = {} }
+			table.insert(App.cleanups, function()
+				EventInput.release(session)
+			end)
+			local badgeAt, stageAt = 0, 0
+			while active(generation) do
+				if os.clock() >= badgeAt then
+					badgeAt = os.clock() + 12
+					if verify(current, true) then
+						return true, "Hollow badge earned"
+					end
+				end
+				local carried = App.player:GetAttribute("Collectable")
+				local completed = 0
+				for _, spec in ipairs(instruments) do
+					if App.player:GetAttribute(spec.attribute) == true then
+						completed += 1
+					end
+				end
+				local lobby = Day8.team(App.player) == "Lobby"
+				Day8.vote(network, session)
+				if not Day8.ready(generation) then
+					status("Waiting to get up", "The route resumes when you're back", completed / 3)
+				elseif completed == 3 then
+					status("Instruments returned", "Checking for the badge", 0.98)
+				elseif Day8.team(App.player) == "Killer" then
+					status("Waiting for a survivor round", "Your instrument progress stays saved", completed / 3)
+				elseif not lobby and Day8.evade(session, Day8.killerThreats(), generation) then
+					status("Moving away from the killer", "Your instrument stays with you", completed / 3)
+				elseif lobby and carried then
+					local wanted
+					for _, entry in ipairs(Day8.members()) do
+						if entry.spec.item == carried then
+							wanted = entry
+							break
+						end
+					end
+					if wanted then
+						status("Returning " .. wanted.spec.title, wanted.title, completed / 3)
+						if
+							approach(wanted.part.Position, generation, wanted.object, false, function()
+								return Day8.ready(generation)
+							end)
+						then
+							if active(generation) and App.player:GetAttribute("Collectable") == carried then
+								call("Return " .. carried, function()
+									return network:InvokeServer("ReturnHollowInstrument", wanted.spec.member)
+								end, 8, generation)
+								waitUntil(function()
+									return App.player:GetAttribute(wanted.spec.attribute) == true
+								end, 3, generation)
+							end
+						end
+					else
+						status("Loading the band", "Looking for the lobby stage", completed / 3)
+					end
+				elseif lobby then
+					status("Waiting for Happy Neighborhood", "Voting for it whenever it's offered", completed / 3)
+				elseif carried then
+					status("Instrument secured", "Find an open exit. It stays with you if you die.", completed / 3)
+					local exit = Day8.nearest(Day8.killerExits())
+					if exit then
+						approach(exit.part.Position, generation, exit.object, false, function()
+							return Day8.ready(generation)
+						end)
+						pause(1, generation)
+					end
+				else
+					local items = {}
+					for _, entry in ipairs(Day8.killerItems()) do
+						if os.clock() >= (session.retry[entry.object] or 0) then
+							table.insert(items, entry)
+						end
+					end
+					local target = Day8.nearest(items)
+					if target then
+						status("Getting " .. target.title, "Returning it to the band after this round", completed / 3)
+						Day8.pickup(session, target, generation)
+						session.retry[target.object] = os.clock() + 2
+					else
+						status(
+							"Looking for the instruments",
+							"They appear in Happy Neighborhood. Checking the loaded map.",
+							completed / 3
+						)
+						Day8.scout(session, generation)
+					end
+				end
+				if lobby and carried and os.clock() >= stageAt and #Day8.members() == 0 then
+					stageAt = os.clock() + 8
+					pcall(network.FireServer, network, "TeleportToEventStage")
+				end
+				if not pause(0.4, generation) then
+					break
+				end
+			end
+			return false, "Stopped"
+		end
+
+		-- sonaria
+		function Day8.state(key)
+			local state = Day8.modules.GameplayStateService
+			return state and type(state.GetState) == "function" and state.GetState(key) or nil
+		end
+
+		function Day8.objectiveItems()
+			local result = {}
+			local api = Day8.modules.Objective
+			for _, object in pairs(api and api.GetAll and api.GetAll() or {}) do
+				local instance = object.Instance
+				local part = Day8.part(object.Model or instance)
+				if
+					instance
+					and instance.Parent
+					and part
+					and instance:GetAttribute("Activated") ~= true
+					and instance:GetAttribute("Dead") ~= true
+					and (tonumber(instance:GetAttribute("Health")) or 1) > 0
+				then
+					table.insert(result, {
+						object = instance,
+						part = part,
+						native = object,
+						title = instance:GetAttribute("Locked") and "Locked infection" or "Infection",
+					})
+				end
+			end
+			return result
+		end
+
+		function Day8.releaseObjective(session)
+			local lease = session.objective
+			session.objective = nil
+			if lease and lease.native and lease.native.Active and type(lease.native.Exit) == "function" then
+				task.spawn(function()
+					pcall(lease.native.Exit, lease.native)
+				end)
+			end
+			EventInput.release(session)
+		end
+
+		function Day8.skill(object)
+			local wrapper = object and object.ActiveSkillCheck
+			local mini = wrapper and wrapper.Minigame
+			if not Day8.skills or not mini or type(mini.Click) ~= "function" then
+				return false
+			end
+			local valid, win, critical = false, false, false
+			if type(mini._checkZones) == "function" and type(mini.CurrentScale) == "number" then
+				valid, win, critical = pcall(mini._checkZones, mini, mini.CurrentScale)
+			elseif type(mini.CheckPosition) == "function" and mini.MoverPosition and mini.SuccessZone then
+				valid, win, critical = pcall(mini.CheckPosition, mini, mini.MoverPosition, mini.SuccessZone)
+			end
+			if valid and win and (not mini.Tutorial and not mini.CriticalOnly or critical) then
+				return pcall(mini.Click, mini)
+			end
+			return false
+		end
+
+		function Day8.startObjective(session, entry, generation)
+			local object = entry.native
+			if not Day8.ready(generation) or not object:CanInteract() then
+				return false
+			end
+			local wrapper = Day8.modules.PlayerWrapper
+			local player = wrapper and wrapper.getWrapperFromPlayer(App.player)
+			if not player then
+				return false
+			end
+			local point = object:GetInteractionPositionForPlayer(App.player)
+			if typeof(point) == "CFrame" then
+				point = point.Position
+			end
+			if typeof(point) ~= "Vector3" then
+				point = entry.part.Position
+			end
+			if
+				not approach(point, generation, entry.object, false, function()
+					return Day8.ready(generation) and entry.object.Parent ~= nil and object:CanInteract()
+				end)
+			then
+				return false
+			end
+			for _, menu in ipairs(object.ProximityMenus or {}) do
+				if menu.Config and type(menu.Config.Run) == "function" then
+					local ok = call(entry.object, function()
+						if Day8.ready(generation) and object:CanInteract() then
+							menu.Config.Run()
+							if not active(generation) and object.Active then
+								object:Exit()
+							end
+						end
+					end, 6, generation)
+					if ok and active(generation) then
+						local started = waitUntil(function()
+							return object.Active == true or not entry.object.Parent
+						end, 2, generation)
+						if started and object.Active then
+							session.objective = entry
+							return true
+						end
+					end
+					break
+				end
+			end
+			return false
+		end
+
+		function Day8.sonariaThreats()
+			local result = {}
+			for _, object in ipairs(Collection:GetTagged("Mob")) do
+				local part = Day8.part(object)
+				if part and object:GetAttribute("Dead") ~= true then
+					table.insert(result, { object = object, part = part, title = "Monster", threat = true })
+				end
+			end
+			return result
+		end
+
+		function Day8.claws()
+			local api = Day8.modules.SpawnedConsumableClient
+			local result = {}
+			for _, entry in pairs(api and api.GetAll and api.GetAll() or {}) do
+				if
+					entry.ConsumableType == "HollowClaw"
+					and entry.SpawnPart
+					and entry.SpawnPart.Parent
+					and not entry.Claiming
+				then
+					local part = Day8.part(entry.SpawnPart)
+					if part then
+						table.insert(
+							result,
+							{ object = entry.SpawnPart, part = part, native = entry, title = "Hollow Claw" }
+						)
+					end
+				end
+			end
+			return result
+		end
+
+		function Day8.boss(session, generation)
+			if Day8.evade(session, Day8.sonariaThreats(), generation) then
+				return "Moving clear of the monsters"
+			end
+			local wrapper = Day8.modules.PlayerWrapper.getWrapperFromPlayer(App.player)
+			local hotbar = wrapper and wrapper.PlayerData and wrapper.PlayerData:FindFirstChild("Hotbar")
+			local slot
+			for _, value in ipairs(hotbar and hotbar:GetChildren() or {}) do
+				if value:IsA("StringValue") and value.Value == "HollowClaw" then
+					slot = value
+					break
+				end
+			end
+			if not slot then
+				session.clawSlot = nil
+				local claw = Day8.nearest(Day8.claws())
+				if claw and claw.native:CanClaim() == true then
+					if
+						approach(claw.part.Position, generation, claw.object, false, function()
+							return Day8.ready(generation)
+						end)
+					then
+						call(claw.object, function()
+							if Day8.ready(generation) then
+								return claw.native:Claim()
+							end
+						end, 6, generation)
+					end
+					return "Getting a Hollow Claw"
+				end
+				if claw then
+					return "Clear a hotbar slot for a Hollow Claw"
+				end
+				return "Waiting for another Hollow Claw to spawn"
+			end
+			local strike, hits = Day8.modules.HollowClawStrike, Day8.modules.StainBossHits
+			if session.clawSlot ~= slot then
+				strike.OnHotbarSlotPressed(slot)
+				session.clawSlot = slot
+			end
+			local boss = strike.GetBossRoot()
+			if not boss or not boss.Parent then
+				return "Waiting for the boss"
+			end
+			if not hits.IsHittable() then
+				return "Waiting for the boss to surface"
+			end
+			local _, root = character()
+			if (root.Position - boss.Position).Magnitude > 120 then
+				local flat = Vector3.new(root.Position.X - boss.Position.X, 0, root.Position.Z - boss.Position.Z)
+				if flat.Magnitude < 1 then
+					flat = Vector3.new(1, 0, 0)
+				end
+				approach(boss.Position + flat.Unit * 85, generation, nil, false, function()
+					return Day8.ready(generation)
+				end)
+			end
+			local service = Day8.modules.ConsumablesService
+			if not Day8.bossAim then
+				return "Aim at the boss and throw your Hollow Claw"
+			end
+			if service.CanUseConsumable(App.player, slot.Name) ~= true then
+				return "Waiting for the claw cooldown"
+			end
+			if Day8.ready(generation) then
+				App.event7.face(session, boss)
+				if pause(0.06, generation) and Day8.ready(generation) then
+					local _, aimed = strike.GetAim()
+					if aimed and service.CanUseConsumable(App.player, slot.Name) == true then
+						call("Hollow Claw", function()
+							if Day8.ready(generation) then
+								return service.UseConsumable(slot.Name)
+							end
+						end, 6, generation)
+					end
+				end
+				EventInput.release(session)
+			end
+			return "Throwing Hollow Claws at the boss"
+		end
+
+		function Day8.upgrade(session, generation)
+			local object = Storage:FindFirstChild("ChoiceUpgradeReplication")
+			local payload = object and object:GetAttribute("Choices")
+			if type(payload) ~= "string" or payload == "" then
+				session.upgrade = nil
+				return false
+			end
+			if session.upgrade ~= payload and os.clock() >= (session.upgradeAt or 0) then
+				session.upgradeAt = os.clock() + 3
+				local ok, choices = pcall(Http.JSONDecode, Http, payload)
+				if ok and type(choices) == "table" and #choices > 0 then
+					local api = Day8.modules.ChoiceUpgradeService
+					if api then
+						local accepted, result = call("Sonaria upgrade", function()
+							if active(generation) then
+								return api.RequestToSelectUpgrade(1)
+							end
+						end, 5, generation)
+						if accepted and result == true then
+							session.upgrade = payload
+						end
+					end
+				end
+			end
+			return true
+		end
+
+		function Day8.runSonaria(generation)
+			if game.PlaceId ~= current.eventPlace then
+				return false, "Join the Hollow event run, then press Start"
+			end
+			local needed = {
+				"GameplayStateService",
+				"GameModeRunService",
+				"PlayerWrapper",
+				"Objective",
+				"SpawnedConsumableClient",
+				"ConsumablesService",
+				"HollowClawStrike",
+				"StainBossHits",
+				"ReviveService",
+				"ChoiceUpgradeService",
+			}
+			for _, name in ipairs(needed) do
+				status("Loading Sonaria Horror Escape", "Waiting for the event controls", 0)
+				if not waitUntil(function()
+					return Day8.load(name, generation)
+				end, 25, generation) then
+					return false, "The event controls haven't loaded. Choose a character, then try Start."
+				end
+			end
+			local session = { retry = {}, round = nil }
+			table.insert(App.cleanups, function()
+				Day8.releaseObjective(session)
+			end)
+			Day8.session = session
+			local badgeAt, readyAt = 0, 0
+			while active(generation) do
+				if os.clock() >= badgeAt then
+					badgeAt = os.clock() + 12
+					if verify(current, true) then
+						return true, "Hollow badge earned"
+					end
+				end
+				local mode = Day8.modules.GameModeRunService
+				local round = Day8.state("RoundNumber") or 0
+				if session.round ~= round then
+					Day8.releaseObjective(session)
+					session.round, session.retry = round, {}
+				end
+				local native = Day8.modules.Objective.GetActiveInteraction()
+				if native and not session.objective then
+					for _, entry in ipairs(Day8.objectiveItems()) do
+						if entry.native == native then
+							session.objective = entry
+							break
+						end
+					end
+				end
+				local alive = Day8.modules.GameplayStateService.IsPlayerAlive(App.player)
+				if mode.GetModeId() ~= "RobloxHalloween2026" then
+					Day8.releaseObjective(session)
+					status("Waiting for the Hollow run", "Join through the Hollow event gate", 0)
+				elseif not alive then
+					Day8.releaseObjective(session)
+					status("Waiting to revive", "Using a free revive if one is available", round / 6)
+					local revive = Day8.modules.ReviveService
+					if revive.CanUseFreeRevive(App.player) and os.clock() >= (session.reviveAt or 0) then
+						session.reviveAt = os.clock() + 8
+						pcall(revive.RequestFreeRevive)
+					end
+				elseif Day8.upgrade(session, generation) then
+					Day8.releaseObjective(session)
+					status("Picking an upgrade", "Waiting for the next round", round / 6)
+				elseif not session.objective and not Day8.ready(generation) then
+					status("Waiting for the run", "Choose your character or wait for the cutscene", round / 6)
+				elseif Day8.state("BossFightDefeated") == true then
+					Day8.releaseObjective(session)
+					status("Boss defeated", "Let the ending finish. Checking for the badge.", 0.98)
+				elseif Day8.modules.StainBossHits.IsActive() then
+					Day8.releaseObjective(session)
+					status("The Hollow boss", Day8.boss(session, generation), 0.8)
+				elseif session.objective then
+					local entry = session.objective
+					if
+						not entry.object.Parent
+						or entry.object:GetAttribute("Dead") == true
+						or entry.object:GetAttribute("Activated") == true
+						or (tonumber(entry.object:GetAttribute("Health")) or 1) <= 0
+					then
+						Day8.releaseObjective(session)
+					elseif entry.native.Active then
+						status("Clearing the infection", "Staying here until it's done", math.min(0.8, round / 6))
+						Day8.skill(entry.native)
+						local click = entry.native.ActiveMaid and entry.native.ActiveMaid.ClickMinigame
+						local target = click and click.ActiveTarget
+						if
+							not entry.native.ActiveSkillCheck
+							and target
+							and target.Instance
+							and target.Instance.Visible
+							and target.Config
+							and type(target.Config.OnClick) == "function"
+						then
+							pcall(target.Config.OnClick)
+						end
+						local _, gap = Day8.nearest(Day8.sonariaThreats())
+						if gap and gap < 16 then
+							session.retry[entry.object] = os.clock() + 4
+							Day8.releaseObjective(session)
+							Day8.evade(session, Day8.sonariaThreats(), generation)
+						end
+					else
+						session.retry[entry.object] = os.clock() + 1
+						Day8.releaseObjective(session)
+					end
+				elseif Day8.evade(session, Day8.sonariaThreats(), generation) then
+					status("Moving away from the monsters", "Looking for a safer infection", round / 6)
+				else
+					local candidates = {}
+					for _, entry in ipairs(Day8.objectiveItems()) do
+						if
+							entry.native:CanInteract()
+							and os.clock() >= (session.retry[entry.object] or 0)
+							and Day8.clearance(entry.part.Position, Day8.sonariaThreats()) > 24
+						then
+							table.insert(candidates, entry)
+						end
+					end
+					local target = Day8.nearest(candidates)
+					if target then
+						status("Going to an infection", "Round " .. tostring(round) .. " / 6", round / 6)
+						if not Day8.startObjective(session, target, generation) then
+							session.retry[target.object] = os.clock() + 2
+						end
+					else
+						status("Waiting for the next round", "No available infection nearby", round / 6)
+						if os.clock() >= readyAt and Day8.modules.GameplayStateService.IsInIntermission() then
+							readyAt = os.clock() + 5
+							pcall(Day8.modules.GameplayStateService.RequestToReadyUp)
+						end
+					end
+				end
+				if not pause(0.08, generation) then
+					break
+				end
+			end
+			return false, "Stopped"
+		end
+
+		-- manual guides
+		function Day8.items()
+			if current.id == "killer" then
+				local items = Day8.killerItems()
+				for _, entry in ipairs(Day8.members()) do
+					table.insert(items, entry)
+				end
+				for _, entry in ipairs(Day8.killerThreats()) do
+					table.insert(items, entry)
+				end
+				for _, entry in ipairs(Day8.killerExits()) do
+					table.insert(items, entry)
+				end
+				return items
+			elseif current.id == "sonariaescape" then
+				local items = Day8.objectiveItems()
+				for _, entry in ipairs(Day8.claws()) do
+					table.insert(items, entry)
+				end
+				for _, entry in ipairs(Day8.sonariaThreats()) do
+					table.insert(items, entry)
+				end
+				return items
+			end
+			return Day8.pedestals(Day8.hollowState())
+		end
+
+		function Day8.clearMarkers()
+			Day8.markers = false
+			Day8.markerEpoch = (Day8.markerEpoch or 0) + 1
+			for _, item in pairs(Day8.visuals or {}) do
+				item.highlight:Destroy()
+				item.billboard:Destroy()
+			end
+			Day8.visuals = {}
+		end
+
+		function Day8.draw()
+			local keep = {}
+			local _, root = character()
+			local items = Day8.items()
+			if root then
+				table.sort(items, function(a, b)
+					return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+				end)
+			end
+			for index, entry in ipairs(items) do
+				if index > 24 then
+					break
+				end
+				local visual = Day8.visuals[entry.object]
+				if not visual then
+					local highlight = Instance.new("Highlight")
+					highlight.Adornee = entry.object:IsA("Model") and entry.object or entry.part
+					highlight.FillTransparency, highlight.DepthMode = 0.85, Enum.HighlightDepthMode.AlwaysOnTop
+					highlight.OutlineColor = entry.threat and Color3.fromRGB(255, 100, 100) or colors.mint
+					highlight.Parent = App.gui
+					local billboard = Instance.new("BillboardGui")
+					billboard.Size, billboard.StudsOffset, billboard.AlwaysOnTop =
+						UDim2.fromOffset(170, 42), Vector3.new(0, 3, 0), true
+					billboard.Adornee, billboard.Parent = entry.part, App.gui
+					local text = Instance.new("TextLabel")
+					text.Size, text.BackgroundTransparency, text.TextSize = UDim2.fromScale(1, 1), 1, 13
+					text.TextColor3, text.TextStrokeTransparency, text.Parent = highlight.OutlineColor, 0.2, billboard
+					visual = { highlight = highlight, billboard = billboard, text = text }
+					Day8.visuals[entry.object] = visual
+				end
+				visual.text.Text = entry.title
+					.. (root and "\n" .. math.floor((entry.part.Position - root.Position).Magnitude) .. " studs" or "")
+				keep[entry.object] = true
+			end
+			for object, visual in pairs(Day8.visuals) do
+				if not keep[object] then
+					visual.highlight:Destroy()
+					visual.billboard:Destroy()
+					Day8.visuals[object] = nil
+				end
+			end
+		end
+
+		function Day8.toggleMarkers()
+			if Day8.markers then
+				Day8.clearMarkers()
+				refresh()
+				return
+			end
+			Day8.markers, Day8.visuals = true, {}
+			Day8.markerEpoch = (Day8.markerEpoch or 0) + 1
+			local epoch = Day8.markerEpoch
+			task.spawn(function()
+				if current.id == "sonariaescape" then
+					for _, name in ipairs({ "Objective", "SpawnedConsumableClient" }) do
+						Day8.load(name)
+					end
+				elseif current.id == "hollow" then
+					Day8.offerings = hollowModule("OfferingsPuzzle")
+				end
+				while App.alive and Day8.markers and Day8.markerEpoch == epoch do
+					pcall(Day8.draw)
+					task.wait(0.4)
+				end
+			end)
+			refresh()
+		end
+
+		function Day8.clear()
+			Day8.helpers = false
+			Day8.helperEpoch = (Day8.helperEpoch or 0) + 1
+			Day8.clearMarkers()
+			if Day8.session then
+				Day8.releaseObjective(Day8.session)
+				Day8.session = nil
+			end
+		end
+
+		function Day8.startHelpers()
+			if Day8.helpers or current.id ~= "sonariaescape" then
+				return
+			end
+			Day8.helpers = true
+			Day8.helperEpoch = (Day8.helperEpoch or 0) + 1
+			local epoch = Day8.helperEpoch
+			task.spawn(function()
+				if Day8.load("Objective") then
+					while App.alive and Day8.helpers and Day8.helperEpoch == epoch do
+						if Day8.skills then
+							local object = Day8.modules.Objective.GetActiveInteraction()
+							if object then
+								pcall(Day8.skill, object)
+							end
+						end
+						task.wait(0.08)
+					end
+				end
+				if Day8.helperEpoch == epoch then
+					Day8.helpers = false
+					refresh()
+				end
+			end)
+		end
+		App.day8 = Day8
+		runners.killer, runners.sonariaescape = Day8.runKiller, Day8.runSonaria
+	end)()
+end
+
 -- menu
 local function buildUI(parent)
 	local gui = new("ScreenGui", parent, {
@@ -27984,6 +29169,27 @@ local function buildUI(parent)
 		ui.graveBuying.Name = "GraveCashAutoBuy"
 		ui.graveSpent = label(event, "", UDim2.fromOffset(0, 358), UDim2.new(1, -6, 0, 30), 12, colors.muted)
 	end
+	if current and (current.id == "hollow" or current.id == "killer" or current.id == "sonariaescape") then
+		ui.day8Markers = button(event, "Event markers: OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+			App.day8.toggleMarkers()
+		end)
+		if current.id == "hollow" then
+			label(event, "Floor 8: shows each missing offering", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 28), 12, colors.muted)
+		elseif current.id == "sonariaescape" then
+			ui.day8Skills = button(event, "Skill check assist: OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				if App.day8.helpers then
+					App.day8.helpers = false
+					App.day8.helperEpoch = (App.day8.helperEpoch or 0)+1
+				else App.day8.startHelpers() end
+				refresh()
+			end)
+			ui.day8Aim = button(event, "Boss aim: ON", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				App.day8.bossAim = not App.day8.bossAim
+				refresh()
+			end)
+			label(event, "Markers and skill assist also work without Start", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 32), 12, colors.muted)
+		end
+	end
 	if current and current.id == "hollow" then
 		local floors =
 			new("Frame", event, { Name = "FloorSelector", Size = UDim2.new(1, -8, 0, 44), BackgroundTransparency = 1 })
@@ -27998,7 +29204,7 @@ local function buildUI(parent)
 		end)
 		button(floors, ">", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(44, 44), function()
 			if not App.running then
-				App.floor = math.min(7, App.floor + 1)
+				App.floor = math.min(8, App.floor + 1)
 				refresh()
 			end
 		end)
@@ -28216,6 +29422,15 @@ local function buildUI(parent)
 			setProperty(ui.event7Markers, "Text", ui.event7Title .. (enabled and ": ON" or ": OFF"))
 			setProperty(ui.event7Markers, "BackgroundColor3", enabled and colors.mint or colors.raised)
 			setProperty(ui.event7Markers, "TextColor3", enabled and colors.base or colors.text)
+		end
+		for key, enabled in pairs({day8Markers = App.day8 and App.day8.markers == true,
+			day8Skills = App.day8 and App.day8.helpers == true, day8Aim = App.day8 and App.day8.bossAim == true}) do
+			if ui[key] then
+				local title = key == "day8Markers" and "Event markers" or key == "day8Skills" and "Skill check assist" or "Boss aim"
+				setProperty(ui[key], "Text", title .. (enabled and ": ON" or ": OFF"))
+				setProperty(ui[key], "BackgroundColor3", enabled and colors.mint or colors.raised)
+				setProperty(ui[key], "TextColor3", enabled and colors.base or colors.text)
+			end
 		end
 		if ui.megaAssist then
 			local enabled = App.mega.assist == true
@@ -28526,6 +29741,9 @@ App.unload = function()
 	App.unloading = true
 	App.generation += 1
 	App.running = false
+	if App.day8 then
+		pcall(App.day8.clear)
+	end
 	if App.event7 then
 		pcall(App.event7.clear)
 	end
