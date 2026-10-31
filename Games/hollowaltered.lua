@@ -3199,7 +3199,7 @@ local function runHollow(generation)
 			or floor == 8 and Bridge.offeringsCompleted()
 			or floor == 9 and Bridge.leversCompleted()
 	end
-	local completed = saved()
+	local completed = App.personal.completed(floor)
 	local revisitOnly = completed
 		and not App.player:GetAttribute("InMaze")
 		and App.player:GetAttribute("HasRelic") ~= true
@@ -3232,6 +3232,7 @@ local function runHollow(generation)
 		return arrived ~= nil, active(generation) and "Waiting to reach the lobby" or "Stopped"
 	end
 	local function badgeLap()
+		if App.personal then return App.personal.finishFloor(floor, generation) end
 		status("Finishing floor " .. floor, "Quick elevator round trip", 0.95)
 		local entrance = waitUntil(function()
 			return nearest("%MazeElevatorEntrance")
@@ -3473,11 +3474,12 @@ local function runHollow(generation)
 		end
 	end
 	local relic = waitUntil(function()
-		return completed or App.player:GetAttribute("HasRelic") == true
+		return App.player:GetAttribute("HasRelic") == true
 	end, 12, generation)
 	if not relic then
 		return false, "The puzzle opened, but the relic hasn't arrived yet"
 	end
+	if App.personal then App.personal.pending = App.personal.pending or { floor = floor, phase = "return" } end
 	status("Returning the relic", "", 0.9)
 	local returned, returnError = backToLobby()
 	if not returned then
@@ -32189,6 +32191,124 @@ do
 		local Personal = { done = {}, manual = false, links = {}, speed = 50 }
 		local original, originalStop = runners.hollow, stop
 
+		-- floor progress
+		function Personal.saved(floor)
+			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+				if tonumber(number) == floor then
+					return true
+				end
+			end
+			return false
+		end
+
+		function Personal.completed(floor)
+			return Personal.done[floor] == true or Personal.saved(floor)
+		end
+
+		function Personal.returned(floor)
+			return not App.player:GetAttribute("InMaze")
+				and App.player:GetAttribute("HasRelic") ~= true
+				and Personal.saved(floor)
+		end
+
+		function Personal.ride(floor, generation)
+			local client, why = hollowModule("ClientState", generation)
+			if not client then
+				return false, why
+			end
+			local objects, reason = hollowModule("OOPTags", generation)
+			if not objects then
+				return false, reason
+			end
+			local part = waitUntil(function()
+				return nearest(floor and "%MazeElevatorEntrance" or "%MazeElevatorExit")
+			end, 15, generation)
+			if not part then
+				return false, active(generation) and "Waiting for the elevator" or "Stopped"
+			end
+			local ok, detail = rideElevator(part, client, objects, generation, floor)
+			if not ok then
+				return false, detail
+			end
+			local arrived = waitUntil(function()
+				local maze = App.player:GetAttribute("InMaze")
+				return floor and maze == floor or not floor and not maze
+			end, 15, generation)
+			return arrived ~= nil, active(generation) and "Waiting for the elevator to arrive" or "Stopped"
+		end
+
+		function Personal.finishFloor(floor, generation)
+			local pending = Personal.pending
+			if not pending then
+				pending = { floor = floor, phase = "return" }
+				Personal.pending = pending
+			end
+			if pending.floor ~= floor then
+				return false, "Still finishing floor " .. pending.floor
+			end
+			if pending.phase == "return" then
+				local maze = App.player:GetAttribute("InMaze")
+				if maze then
+					if maze ~= floor then
+						return false, "The elevator reached a different floor"
+					end
+					if App.player:GetAttribute("HasRelic") ~= true then
+						return false, "Waiting for the relic"
+					end
+					local ok, why = Personal.ride(nil, generation)
+					if not ok then
+						return false, why
+					end
+				end
+				status("Returning floor " .. floor .. "'s relic", "Waiting for it to save", 0.9)
+				if
+					not waitUntil(function()
+						return Personal.returned(floor)
+					end, 45, generation)
+				then
+					return false, active(generation) and "The relic hasn't been returned yet" or "Stopped"
+				end
+				pending.phase = "enter"
+			end
+			if pending.phase == "enter" then
+				status("Finishing floor " .. floor, "Quick elevator round trip", 0.95)
+				local maze = App.player:GetAttribute("InMaze")
+				if not maze then
+					local ok, why = Personal.ride(floor, generation)
+					if not ok then
+						return false, why
+					end
+				elseif maze ~= floor then
+					return false, "The elevator reached a different floor"
+				end
+				pending.phase = "exit"
+			end
+			if pending.phase == "exit" then
+				local maze = App.player:GetAttribute("InMaze")
+				if maze then
+					if maze ~= floor then
+						return false, "The elevator reached a different floor"
+					end
+					status("Back to the lobby", "", 0.98)
+					local ok, why = Personal.ride(nil, generation)
+					if not ok then
+						return false, why
+					end
+				end
+				if
+					not waitUntil(function()
+						return Personal.returned(floor)
+					end, 15, generation)
+				then
+					return false, active(generation) and "Waiting for the lobby return" or "Stopped"
+				end
+			end
+			Personal.done[floor], Personal.pending = true, nil
+			App.rows.hollow = "Relic returned"
+			return true, "Floor " .. floor .. " finished"
+		end
+
+		-- floor 10
 		function Personal.inFinale()
 			return App.player
 				and (App.player:GetAttribute("InFinale") == true or App.player:GetAttribute("InMaze") == 10)
@@ -32348,6 +32468,28 @@ do
 				return Personal.enterFinale(generation)
 			end
 			Personal.disable()
+			status("Checking cleared floors", "", 0)
+			if
+				not waitUntil(function()
+					return App.player:FindFirstChild("Loaded")
+				end, 30, generation)
+			then
+				return false, active(generation) and "Your floor progress is still loading" or "Stopped"
+			end
+			if
+				not App.player:GetAttribute("InMaze")
+				and App.player:GetAttribute("HasRelic") == true
+				and not Personal.pending
+			then
+				status("Returning the relic", "Waiting for it to save", 0)
+				if
+					not waitUntil(function()
+						return not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true
+					end, 45, generation)
+				then
+					return false, active(generation) and "The relic hasn't been returned yet" or "Stopped"
+				end
+			end
 			local inside = App.player:GetAttribute("InMaze")
 			local order = {}
 			if type(inside) == "number" and inside >= 1 and inside <= 9 then
@@ -32359,7 +32501,25 @@ do
 				end
 			end
 			for _, floor in ipairs(order) do
-				if Personal.done[floor] and floor ~= inside then
+				if Personal.completed(floor) and not (Personal.pending and Personal.pending.floor == floor) then
+					if App.player:GetAttribute("InMaze") == floor then
+						if App.player:GetAttribute("HasRelic") == true then
+							local ok, why = Personal.ride(nil, generation)
+							if not ok then
+								return false, why
+							end
+							local finished, reason = Personal.finishFloor(floor, generation)
+							if not finished then
+								return false, reason
+							end
+						else
+							local ok, why = Personal.ride(nil, generation)
+							if not ok then
+								return false, why
+							end
+						end
+					end
+					status("Skipping floor " .. floor, "Already cleared", floor / 10)
 					continue
 				end
 				if not active(generation) then
@@ -32380,7 +32540,12 @@ do
 						attempt == 1 and "" or "Trying this floor again",
 						(floor - 1) / 10
 					)
-					local ok, success, detail = pcall(original, generation)
+					local ok, success, detail
+					if Personal.pending and Personal.pending.floor == floor then
+						ok, success, detail = pcall(Personal.finishFloor, floor, generation)
+					else
+						ok, success, detail = pcall(original, generation)
+					end
 					cleanRun()
 					if not active(generation) then
 						return false, "Stopped"
