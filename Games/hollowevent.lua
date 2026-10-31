@@ -30524,15 +30524,7 @@ end
 -- finale
 do
 	(function()
-		local Finale = { markers = false, visuals = {}, reserved = setmetatable({}, { __mode = "k" }) }
-		local tags = {
-			["%KeyGiver"] = "key",
-			["%GateLock"] = "lock",
-			["%Gate"] = "gate",
-			["%ObbyCheckpoint"] = "checkpoint",
-			["%FinalExitPortal"] = "exit",
-			["%WindowPortal"] = "portal",
-		}
+		local Finale = { markers = false, visuals = {} }
 
 		function Finale.physical(object)
 			local parent = object
@@ -30553,7 +30545,7 @@ do
 				table.insert(excluded, ignore)
 			end
 			params.FilterDescendantsInstances = excluded
-			local center, level
+			local center, level, support
 			for _, offset in ipairs({
 				Vector3.zero,
 				Vector3.new(spread, 0, spread),
@@ -30593,9 +30585,9 @@ do
 				if level and math.abs(level - hit.Position.Y) > 1 then
 					return nil
 				end
-				center, level = center or hit.Position, hit.Position.Y
+				center, level, support = center or hit.Position, hit.Position.Y, support or hit.Instance
 			end
-			return center
+			return center, support
 		end
 
 		function Finale.portalStand(session, entry, portal, generation)
@@ -30657,83 +30649,6 @@ do
 			end
 		end
 
-		function Finale.section(object, skipSelf)
-			local parent = skipSelf and object.Parent or object
-			while parent and parent ~= workspace do
-				local scene = parent:GetAttribute("SceneId")
-				local number = type(scene) == "string" and scene:match("^Section(%d+)$")
-				if number then
-					return tonumber(number)
-				end
-				parent = parent.Parent
-			end
-		end
-
-		function Finale.locate(session)
-			local _, root = character()
-			if not root then
-				return
-			end
-			local closest, distance
-			for _, entry in pairs(session.items) do
-				if
-					entry.section and (entry.kind == "portal" or entry.kind == "arrival" or entry.kind == "checkpoint")
-				then
-					local gap = (entry.part.Position - root.Position).Magnitude
-					if not distance or gap < distance then
-						closest, distance = entry.section, gap
-					end
-					local landing = entry.kind == "portal" and entry.object:GetAttribute("Landing")
-					if typeof(landing) == "Vector3" and entry.destination then
-						gap = (landing - root.Position).Magnitude
-						if gap < distance then
-							closest, distance = entry.destination, gap
-						end
-					end
-				end
-			end
-			if closest and distance < 160 and (not session.section or closest >= session.section) then
-				session.section = closest
-			end
-		end
-
-		function Finale.needsKeys(session)
-			local section = session.section
-			local text = session.objective and session.objective.text
-			text = type(text) == "string" and text:lower() or ""
-			if text:find("escape", 1, true) or text:find("inspector", 1, true) then
-				return false
-			end
-			return section == 5
-				or section == 9
-				or section == 13
-				or text:find("key", 1, true) ~= nil
-				or text:find("unlock", 1, true) ~= nil
-				or text:find("gate", 1, true) ~= nil
-				or not section and text == ""
-		end
-
-		function Finale.reservedKey(object, message)
-			if type(message) ~= "string" then
-				return false
-			end
-			local text = message:lower()
-			if
-				text:find("owned by", 1, true)
-				or text:find("belongs to", 1, true)
-				or text:find("reserved for", 1, true)
-				or text:find("creator", 1, true)
-				or text:find("youtuber", 1, true)
-				or text:find("only the owner", 1, true)
-				or text:match("^only .- can claim")
-				or text:match("^only .- can pick")
-			then
-				Finale.reserved[object] = true
-				return true
-			end
-			return false
-		end
-
 		function Finale.completed()
 			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
 				if tonumber(number) == 10 then
@@ -30741,153 +30656,6 @@ do
 				end
 			end
 			return false
-		end
-
-		function Finale.key(index)
-			if type(index) ~= "number" or index % 1 ~= 0 then
-				return nil
-			end
-			local name = "Key" .. index
-			local backpack, model = App.player:FindFirstChild("Backpack"), App.player.Character
-			return backpack and backpack:FindFirstChild(name) or model and model:FindFirstChild(name)
-		end
-
-		function Finale.group(object)
-			local parent = object
-			while parent and parent ~= workspace do
-				local number = parent.Name:match("^LockKeySet(%d+)$")
-				if number then
-					return tonumber(number)
-				end
-				parent = parent.Parent
-			end
-		end
-
-		function Finale.add(session, object, kind)
-			local zone = workspace:FindFirstChild("FinaleZone")
-			if not object or not zone or not object:IsDescendantOf(zone) or not Finale.physical(object) then
-				return
-			end
-			if object:IsA("BasePart") then
-				kind = kind
-					or (object:FindFirstChild("GrabRemote") and "key")
-					or (object:FindFirstChild("InsertRemote") and "lock")
-					or (
-						object.Name == "SectionPortal"
-						and object:GetAttribute("SceneCategory") == "WindowPortalScenes"
-						and "portal"
-					)
-			elseif object:IsA("ProximityPrompt") then
-				kind = "prompt"
-			elseif object:IsA("RemoteFunction") and object.Parent then
-				if object.Name == "GrabRemote" or object.Name == "InsertRemote" then
-					Finale.add(session, object.Parent, object.Name == "GrabRemote" and "key" or "lock")
-				end
-			end
-			local section, destination = Finale.section(object, kind == "portal"), nil
-			if kind == "portal" then
-				destination = Finale.section(object)
-				if object.Name ~= "SectionPortal" or not section or not destination or destination <= section then
-					kind = section and "arrival" or nil
-				end
-			end
-			if kind then
-				local part = App.day8.part(object:IsA("ProximityPrompt") and object.Parent or object)
-				if part then
-					session.items[object] =
-						{ object = object, part = part, kind = kind, section = section, destination = destination }
-				end
-			end
-		end
-
-		function Finale.index(session)
-			local zone = workspace:FindFirstChild("FinaleZone")
-			if zone ~= session.zone then
-				if session.zoneAdded then
-					session.zoneAdded:Disconnect()
-				end
-				session.zone, session.queue, session.head = zone, zone and { zone } or {}, 1
-				if zone then
-					session.zoneAdded = zone.DescendantAdded:Connect(function(object)
-						Finale.add(session, object)
-					end)
-				end
-			end
-			for tag, kind in pairs(tags) do
-				for _, object in ipairs(Collection:GetTagged(tag)) do
-					Finale.add(session, object, kind)
-				end
-			end
-			local queue = session.queue or {}
-			for _ = 1, 250 do
-				local object = queue[session.head or 1]
-				if not object then
-					break
-				end
-				session.head = (session.head or 1) + 1
-				if object.Parent then
-					Finale.add(session, object)
-					for _, child in ipairs(object:GetChildren()) do
-						table.insert(queue, child)
-					end
-				end
-			end
-			if (session.head or 1) > #queue then
-				session.queue, session.head = {}, 1
-			end
-			for object, entry in pairs(session.items) do
-				if not object:IsDescendantOf(workspace) or not entry.part:IsDescendantOf(workspace) then
-					session.items[object], session.visited[object], session.retry[object] = nil, nil, nil
-				end
-			end
-		end
-
-		function Finale.bind(session, name, callback)
-			local remote = getPath(Storage, "Remotes", name)
-			if remote and remote:IsA("RemoteEvent") and session.bound[name] ~= remote then
-				if session.listeners[name] then
-					session.listeners[name]:Disconnect()
-				end
-				session.bound[name] = remote
-				session.listeners[name] = remote.OnClientEvent:Connect(callback)
-			end
-		end
-
-		function Finale.objective(session, generation)
-			Finale.bind(session, "FinaleObjectiveCompleted", function()
-				session.dirty = true
-			end)
-			Finale.bind(session, "CheckpointReached", function()
-				session.checkpoints += 1
-				session.changedAt, session.dirty = os.clock(), true
-			end)
-			Finale.bind(session, "FinalExitPlay", function()
-				session.exiting, session.changedAt = true, os.clock()
-			end)
-			if os.clock() < (session.pollAt or 0) then
-				return
-			end
-			session.pollAt = os.clock() + (session.dirty and 0.5 or 1.5)
-			session.dirty = false
-			local remote = getPath(Storage, "Remotes", "FinaleObjective")
-			if not remote or not remote:IsA("RemoteFunction") then
-				return
-			end
-			local ok, packet = call(remote, function()
-				return remote:InvokeServer()
-			end, 3, generation)
-			if ok and type(packet) == "table" and type(packet.text) == "string" then
-				local key = tostring(packet.index) .. ":" .. packet.text
-				if key ~= session.objectiveKey then
-					session.objectiveKey, session.changedAt = key, os.clock()
-					for object, entry in pairs(session.items) do
-						if entry.kind == "prompt" then
-							session.visited[object] = nil
-						end
-					end
-				end
-				session.objective = packet
-			end
 		end
 
 		function Finale.ready(session, generation)
@@ -30903,107 +30671,185 @@ do
 				and not session.client.isLocked("CharacterBusyState")
 		end
 
-		function Finale.gate(session)
-			local chosen
+		function Finale.clearMarkers()
+			Finale.markers = false
+			Finale.epoch = (Finale.epoch or 0) + 1
+			for _, visual in pairs(Finale.visuals) do
+				visual.highlight:Destroy()
+				visual.billboard:Destroy()
+			end
+			Finale.visuals = {}
+		end
+
+		function Finale.clear()
+			Finale.clearMarkers()
+			if Finale.session then
+				Finale.close(Finale.session)
+				Finale.session = nil
+			end
+		end
+
+		function Finale.section(object, skipSelf)
+			local parent = skipSelf and object.Parent or object
+			while parent and parent ~= workspace do
+				local id = parent:GetAttribute("SceneId")
+				if type(id) == "string" and id ~= "" then
+					return id
+				end
+				parent = parent.Parent
+			end
+		end
+
+		function Finale.owner(object)
+			local parent = object and object.Parent
+			while parent and parent.Parent and parent ~= workspace do
+				if parent.Parent.Name == "FinaleModel" or parent.Parent.Name == "FinaleZone" then
+					return parent
+				end
+				parent = parent.Parent
+			end
+		end
+
+		function Finale.add(session, object, kind)
+			local zone = workspace:FindFirstChild("FinaleZone")
+			if
+				not zone
+				or not object:IsA("BasePart")
+				or not object:IsDescendantOf(zone)
+				or not Finale.physical(object)
+			then
+				return
+			end
+			if kind ~= "portal" and kind ~= "exit" then
+				return
+			end
+			local source, destination = Finale.section(object, true), object:GetAttribute("SceneId")
+			local view, landing = object:GetAttribute("ViewCFrame"), object:GetAttribute("Landing")
+			if
+				kind == "portal"
+				and (
+					type(destination) ~= "string"
+					or destination == ""
+					or typeof(view) ~= "CFrame"
+					or typeof(landing) ~= "Vector3"
+				)
+			then
+				kind = "arrival"
+			end
+			if session.items[object] and session.items[object].kind == "exit" and kind ~= "exit" then
+				return
+			end
+			local previous = session.items[object]
+			if
+				previous
+				and (
+					previous.destination ~= destination
+					or previous.section ~= source
+					or previous.landing ~= landing
+					or previous.view ~= view
+				)
+			then
+				session.visited[object], session.blocked[object], session.retry[object] = nil, nil, nil
+			end
+			session.items[object] = {
+				object = object,
+				part = object,
+				kind = kind,
+				section = source,
+				destination = destination,
+				owner = Finale.owner(object),
+				landing = landing,
+				view = view,
+			}
+		end
+
+		function Finale.index(session)
+			local present = {}
+			for _, object in ipairs(Collection:GetTagged("%WindowPortal")) do
+				present[object] = true
+				Finale.add(session, object, "portal")
+			end
+			for _, object in ipairs(Collection:GetTagged("%FinalExitPortal")) do
+				present[object] = true
+				Finale.add(session, object, "exit")
+			end
+			for object in pairs(session.items) do
+				if not object:IsDescendantOf(workspace) or not Finale.physical(object) then
+					session.items[object], session.visited[object], session.retry[object], session.blocked[object] =
+						nil, nil, nil, nil
+				elseif not present[object] then
+					session.items[object] = nil
+				end
+			end
+		end
+
+		function Finale.locate(session)
+			if os.clock() < (session.locateAt or 0) then
+				return
+			end
+			session.locateAt = os.clock() + 0.4
+			local model, root, humanoid = character()
+			if not root then
+				return
+			end
+			local height = root.Position.Y - math.max(2.6, humanoid.HipHeight + root.Size.Y / 2)
+			local floor, support = Finale.floor(root.Position, nil, model, height, 0.8)
+			if support then
+				session.owner = Finale.owner(support)
+			end
+			local id = support and Finale.section(support)
+			if id then
+				session.section = id
+				session.safe = { frame = model:GetPivot(), point = root.Position, model = model, section = id }
+				return
+			end
+			local found, gap
 			for _, entry in pairs(session.items) do
-				if entry.kind == "gate" and entry.part.CanCollide then
-					if not chosen or entry.part.Position.X < chosen.part.Position.X then
-						chosen = entry
+				local distance = (entry.part.Position - root.Position).Magnitude
+				if entry.section and (not gap or distance < gap) then
+					found, gap = entry.section, distance
+				end
+				local landing = entry.kind == "portal" and entry.object:GetAttribute("Landing")
+				if typeof(landing) == "Vector3" then
+					distance = (landing - root.Position).Magnitude
+					if not gap or distance < gap then
+						found, gap = entry.destination, distance
 					end
 				end
 			end
-			return chosen
+			if found and gap < 100 then
+				session.section = found
+			end
 		end
 
 		function Finale.entries(session)
-			local choices, gate = {}, Finale.gate(session)
 			Finale.locate(session)
-			local group = gate and (Finale.group(gate.object) or tonumber(gate.object:GetAttribute("Id")))
-			for object, entry in pairs(session.items) do
-				local index = tonumber(object:GetAttribute("Index"))
-				local wanted = entry.kind == "key" and not Finale.key(index) and not session.visited[object]
-					or entry.kind == "lock" and Finale.key(index) and not session.visited[object]
-					or entry.kind == "checkpoint" and not session.visited[object]
-					or entry.kind == "exit" and not gate
-					or entry.kind == "portal" and object:GetAttribute("Enabled") ~= false and not session.visited[object]
-					or entry.kind == "prompt" and object.Enabled and not session.visited[object]
-				local ownGroup = Finale.group(object)
-				local allowed = not gate or entry.part.Position.X <= gate.part.Position.X + 8
-				if ownGroup and group then
-					allowed = ownGroup == group
-				end
-				if session.section and entry.section then
-					allowed = allowed and entry.section == session.section
-				end
-				if session.blocked and session.blocked[object] then
-					allowed = false
-				end
-				if entry.kind == "key" or entry.kind == "lock" then
-					allowed = allowed and Finale.needsKeys(session) and not Finale.reserved[object]
-				end
-				if entry.kind == "prompt" then
-					local parent = object.Parent
-					allowed = allowed
-						and parent
-						and parent.Name ~= "SectionPortal"
-						and parent.Name ~= "PortalDestination"
-						and parent:GetAttribute("SceneCategory") ~= "WindowPortalScenes"
-					local text = (object.ActionText .. " " .. object.ObjectText):lower()
-					allowed = allowed
-						and not text:find("buy", 1, true)
-						and not text:find("purchase", 1, true)
-						and not text:find("subscribe", 1, true)
-						and not text:find("key", 1, true)
-						and not text:find("ugc", 1, true)
-				end
-				if wanted and allowed and os.clock() >= (session.retry[object] or 0) then
-					table.insert(choices, entry)
-				end
-			end
+			local portals, exits = {}, {}
 			local _, root = character()
-			local forward
-			for _, entry in ipairs(choices) do
+			for object, entry in pairs(session.items) do
+				local nearby = root and (entry.part.Position - root.Position).Magnitude < 100
+				local source = session.section and entry.section == session.section
+					or session.owner and entry.owner == session.owner
+					or not entry.section and nearby
+				if not session.section and not session.owner then
+					source = nearby
+				end
 				if
-					entry.kind == "portal"
-					and entry.section == session.section
-					and (not forward or entry.part.Position.Y > forward.part.Position.Y)
+					source
+					and not session.visited[object]
+					and not session.blocked[object]
+					and os.clock() >= (session.retry[object] or 0)
+					and object:GetAttribute("Enabled") ~= false
 				then
-					forward = entry
-				end
-			end
-			local climbing = forward and root and forward.part.Position.Y > root.Position.Y + 24
-			if climbing then
-				local filtered = {}
-				for _, entry in ipairs(choices) do
-					local ahead = entry.part.Position - root.Position
-					local goal = forward.part.Position - root.Position
-					if
-						entry.kind ~= "checkpoint"
-						or entry.part.Position.Y >= root.Position.Y - 6 and ahead:Dot(goal) >= -16
-					then
-						table.insert(filtered, entry)
+					if entry.kind == "portal" then
+						table.insert(portals, entry)
+					elseif entry.kind == "exit" then
+						table.insert(exits, entry)
 					end
 				end
-				choices = filtered
 			end
+			local choices = #portals > 0 and portals or exits
 			table.sort(choices, function(a, b)
-				local priority = {
-					portal = climbing and 5 or 1,
-					lock = 2,
-					key = 3,
-					prompt = 4,
-					checkpoint = climbing and 1 or 5,
-					exit = 6,
-				}
-				if priority[a.kind] ~= priority[b.kind] then
-					return priority[a.kind] < priority[b.kind]
-				end
-				if a.kind == "checkpoint" then
-					local ai, bi = tonumber(a.object:GetAttribute("Index")), tonumber(b.object:GetAttribute("Index"))
-					if ai and bi and ai ~= bi then
-						return ai < bi
-					end
-				end
 				return root
 						and (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
 					or false
@@ -31011,210 +30857,120 @@ do
 			return choices
 		end
 
+		function Finale.bind(session)
+			local remote = getPath(Storage, "Remotes", "FinalExitPlay")
+			if remote and remote:IsA("RemoteEvent") and remote ~= session.exitRemote then
+				if session.exitListener then
+					session.exitListener:Disconnect()
+				end
+				session.exitRemote = remote
+				session.exitListener = remote.OnClientEvent:Connect(function()
+					session.exiting = true
+				end)
+			end
+		end
+
 		function Finale.step(session, entry, generation)
-			local object, part, kind = entry.object, entry.part, entry.kind
+			if entry.kind ~= "portal" and entry.kind ~= "exit" then
+				return false
+			end
+			local object, part = entry.object, entry.part
 			local model, root = character()
-			if not Finale.ready(session, generation) or not root then
-				return false
-			end
-			if (kind == "key" or kind == "lock") and (Finale.reserved[object] or not Finale.needsKeys(session)) then
-				return false
-			end
-			local objective, checkpoints = session.objectiveKey, session.checkpoints
-			local index, key = tonumber(object:GetAttribute("Index")), nil
-			if kind == "key" or kind == "lock" then
-				key = Finale.key(index)
-			end
-			local allowed = function()
+			local function allowed()
 				return Finale.ready(session, generation)
 					and App.player.Character == model
-					and part:IsDescendantOf(workspace)
-					and session.objectiveKey == objective
-					and (
-						kind ~= "portal"
-						or object:GetAttribute("Enabled") ~= false and Finale.section(object) == entry.destination
-					)
+					and Finale.physical(object)
+					and object:IsDescendantOf(workspace)
+					and object:GetAttribute("Enabled") ~= false
+					and not session.blocked[object]
+					and (not entry.section or not session.section or entry.section == session.section)
 			end
-			local ignore = part
-			if kind == "checkpoint" and part.CanCollide then
-				ignore = nil
-			end
-			local point = part.Position
-			local portal, origin
-			if kind == "portal" then
-				local objects = session.objects
-				if not objects then
-					objects = hollowModule("OOPTags", generation)
-					session.objects = objects
-				end
-				if not objects or not allowed() then
-					return false
-				end
-				local ok, value = call(object, function()
-					return objects.getObjectAsync("WindowPortal", object)
-				end, 4, generation)
-				if not ok or type(value) ~= "table" or type(value.enter) ~= "function" or not allowed() then
-					return false
-				end
-				portal = value
-				point, origin = Finale.portalStand(session, entry, portal, generation)
-				if not point or not origin then
-					session.retry[object] = os.clock() + 3
-					return false
-				end
-			end
-			local moved =
-				approach(point, generation, ignore, false, allowed, { streamSeconds = 1, settleSeconds = 0.15 })
-			if not moved or not allowed() then
-				return false
-			end
-			if kind == "portal" and root.Position.Y < point.Y + 0.5 then
-				Finale.recover(session, entry, origin, model, root, generation)
+			if not root or not allowed() then
 				return false
 			end
 			session.retry[object] = os.clock() + 3
-			local function changed()
-				return not object:IsDescendantOf(workspace) or session.objectiveKey ~= objective
-			end
-			if kind == "portal" then
-				local landing = object:GetAttribute("Landing")
-				if typeof(landing) ~= "Vector3" or object:GetAttribute("Enabled") == false then
+			if entry.kind == "exit" then
+				if not session.schedule.checkPassed("Gate3") then
 					return false
 				end
-				local remaining = (session.portalAfter or 0) - os.clock()
-				if remaining > 0 and not pause(remaining, generation) then
+				if not approach(part.Position, generation, part, false, allowed) or not allowed() then
 					return false
 				end
-				if not allowed() then
-					return false
-				end
-				if root.Position.Y < point.Y + 0.5 then
-					Finale.recover(session, entry, origin, model, root, generation)
-					return false
-				end
-				EventInput.release(session)
-				local entered = call(object, function()
-					if allowed() and object:GetAttribute("Enabled") ~= false then
-						session.portalAfter = os.clock() + 5.1
-						portal:enter()
-					end
-				end, 3, generation)
-				if not entered then
-					return false
-				end
-				local fell, nativeTrip = false, false
-				local arrived = waitUntil(function()
-					local nowModel, nowRoot = character()
-					if nowModel ~= model or not active(generation) then
-						return nil
-					end
-					local busy = session.client.isLocked("CharacterBusyState") or nowRoot and nowRoot.Anchored
-					nativeTrip = nativeTrip or busy
-					if nowRoot and not nativeTrip and nowRoot.Position.Y < point.Y + 0.5 then
-						fell = true
-						Finale.recover(session, entry, origin, model, nowRoot, generation)
-						return true
-					end
-					return nowRoot
-						and (nowRoot.Position - landing).Magnitude < 18
-						and not session.client.isLocked("CharacterBusyState")
-				end, 18, generation)
-				if arrived and not fell then
-					session.visited[object], session.section, session.changedAt, session.dirty =
-						true, entry.destination, os.clock(), true
-				else
-					session.retry[object] = os.clock() + 6
-				end
-				return arrived ~= nil and not fell
-			elseif kind == "key" or kind == "lock" then
-				if kind == "lock" and not key then
-					return false
-				end
-				local remote = object:FindFirstChild(kind == "key" and "GrabRemote" or "InsertRemote")
-				if not remote or not remote:IsA("RemoteFunction") then
-					return false
-				end
-				App.event7.face(session, part)
-				local ok, accepted, reason = call(remote, function()
-					if allowed() and (root.Position - part.Position).Magnitude <= 10 then
-						return remote:InvokeServer()
-					end
-					return false
-				end, 6, generation)
-				EventInput.release(session)
-				if not ok or accepted ~= true then
-					if ok then
-						Finale.reservedKey(object, reason)
-					end
-					return false
-				end
-				local confirmed = waitUntil(function()
-					if kind == "key" then
-						return Finale.key(index) ~= nil
-					end
-					return not Finale.key(index) or changed()
-				end, 5, generation)
-				if confirmed then
-					session.visited[object], session.changedAt, session.dirty = true, os.clock(), true
-				end
-				return confirmed ~= nil
-			elseif kind == "prompt" then
-				local held = EventInput.hold(session, object, generation, allowed, {
-					accepted = function()
-						return changed() or not object.Enabled
-					end,
-				})
-				if held then
-					local confirmed = waitUntil(function()
-						Finale.objective(session, generation)
-						return changed() or not object.Enabled
-					end, 3, generation)
-					if confirmed then
-						session.visited[object], session.changedAt = true, os.clock()
-					end
-					return confirmed ~= nil
-				end
-			elseif kind == "checkpoint" then
-				local confirmed = waitUntil(function()
-					return session.checkpoints > checkpoints or changed()
-				end, 2, generation)
-				if confirmed then
-					session.visited[object], session.changedAt = true, os.clock()
-					local _, safeRoot, humanoid = character()
-					if safeRoot then
-						local height = safeRoot.Position.Y - math.max(2.6, humanoid.HipHeight + safeRoot.Size.Y / 2)
-						if Finale.floor(safeRoot.Position, entry.section, model, height, 0.8) then
-							session.safe = {
-								frame = model:GetPivot(),
-								point = safeRoot.Position,
-								model = model,
-								section = entry.section,
-							}
-						end
-					end
-				else
-					session.retry[object] = os.clock() + 20
-				end
-				return confirmed ~= nil
-			elseif kind == "exit" then
 				local remote = getPath(Storage, "Remotes", "FinalExitEnter")
-				if
-					not session.exiting
-					and remote
-					and remote:IsA("RemoteEvent")
-					and allowed()
-					and (root.Position - part.Position).Magnitude <= 10
-					and not Finale.gate(session)
-				then
-					local schedule = session.schedule
-					if schedule.checkPassed("Gate3") then
-						pcall(remote.FireServer, remote, object)
-					end
+				if remote and remote:IsA("RemoteEvent") and (root.Position - part.Position).Magnitude <= 10 then
+					pcall(remote.FireServer, remote, object)
 				end
 				return waitUntil(function()
 					return session.exiting or Finale.completed()
 				end, 6, generation) ~= nil
 			end
+			local landing = object:GetAttribute("Landing")
+			if typeof(landing) ~= "Vector3" or typeof(object:GetAttribute("ViewCFrame")) ~= "CFrame" then
+				return false
+			end
+			local objects = session.objects or hollowModule("OOPTags", generation)
+			session.objects = objects
+			if not objects or not allowed() then
+				return false
+			end
+			local ok, portal = call(object, function()
+				return objects.getObjectAsync("WindowPortal", object)
+			end, 4, generation)
+			if not ok or type(portal) ~= "table" or type(portal.enter) ~= "function" or not allowed() then
+				return false
+			end
+			local point, origin = Finale.portalStand(session, entry, portal, generation)
+			if not point or not origin or not allowed() then
+				return false
+			end
+			if not approach(point, generation, part, false, allowed, { streamSeconds = 1, settleSeconds = 0.15 }) then
+				return false
+			end
+			if not allowed() then
+				return false
+			end
+			local remaining = (session.portalAfter or 0) - os.clock()
+			if remaining > 0 and not pause(remaining, generation) then
+				return false
+			end
+			if not allowed() then
+				return false
+			end
+			if root.Position.Y < point.Y + 0.5 then
+				Finale.recover(session, entry, origin, model, root, generation)
+				return false
+			end
+			local entered = call(object, function()
+				if allowed() then
+					session.portalAfter = os.clock() + 5.1
+					portal:enter()
+				end
+			end, 3, generation)
+			if not entered then
+				return false
+			end
+			local fell, nativeTrip = false, false
+			local arrived = waitUntil(function()
+				local nowModel, nowRoot = character()
+				if nowModel ~= model or not active(generation) then
+					return nil
+				end
+				nativeTrip = nativeTrip or session.client.isLocked("CharacterBusyState") or nowRoot and nowRoot.Anchored
+				if nowRoot and not nativeTrip and nowRoot.Position.Y < point.Y + 0.5 then
+					fell = true
+					Finale.recover(session, entry, origin, model, nowRoot, generation)
+					return true
+				end
+				return nowRoot
+					and (nowRoot.Position - landing).Magnitude < 18
+					and not session.client.isLocked("CharacterBusyState")
+			end, 18, generation)
+			if arrived and not fell then
+				session.visited[object], session.section, session.locateAt = true, entry.destination, 0
+				session.crossings += 1
+				return true
+			end
+			session.retry[object] = os.clock() + 6
 			return false
 		end
 
@@ -31222,40 +30978,36 @@ do
 			if os.clock() < (session.streamAt or 0) then
 				return
 			end
-			session.streamAt = os.clock() + 4
-			local targets = getPath(workspace, "Terrain", "TeleportTargets")
+			session.streamAt = os.clock() + 2
 			local _, root = character()
-			if not targets or not root then
+			if not root then
 				return
 			end
-			local points = {}
-			for _, object in ipairs(targets:GetChildren()) do
-				if object:IsA("Attachment") and object.Name:match("^Finale") then
-					table.insert(points, object)
+			local point = root.Position
+			for _, entry in pairs(session.items) do
+				if
+					entry.kind == "portal"
+					and entry.section == session.section
+					and not session.visited[entry.object]
+				then
+					point = session.streamLanding and entry.object:GetAttribute("Landing") or entry.part.Position
+					break
 				end
 			end
-			table.sort(points, function(a, b)
-				return (a.WorldPosition - root.Position).Magnitude < (b.WorldPosition - root.Position).Magnitude
-			end)
-			session.streamCursor = (session.streamCursor or 0) % math.max(1, #points) + 1
-			local point = points[session.streamCursor]
-			if point then
+			session.streamLanding = not session.streamLanding
+			if typeof(point) == "Vector3" then
 				call("Finale streaming", function()
-					App.player:RequestStreamAroundAsync(point.WorldPosition, 1)
+					App.player:RequestStreamAroundAsync(point, 1)
 				end, 1.5, generation)
 			end
 		end
 
 		function Finale.close(session)
 			EventInput.release(session)
-			if session.zoneAdded then
-				session.zoneAdded:Disconnect()
-				session.zoneAdded = nil
+			if session.exitListener then
+				session.exitListener:Disconnect()
+				session.exitListener = nil
 			end
-			for _, connection in pairs(session.listeners) do
-				connection:Disconnect()
-			end
-			session.listeners, session.bound = {}, {}
 		end
 
 		function Finale.run(generation)
@@ -31279,8 +31031,7 @@ do
 				if not schedule.checkPassed("FinaleEnd") then
 					return false, "The finale elevator isn't open yet"
 				end
-				local objects = hollowModule("OOPTags", generation)
-				local entrance = nearest("%MazeElevatorEntrance")
+				local objects, entrance = hollowModule("OOPTags", generation), nearest("%MazeElevatorEntrance")
 				if not objects or not entrance then
 					return false, "Waiting for the elevator"
 				end
@@ -31296,11 +31047,8 @@ do
 				items = {},
 				visited = {},
 				retry = {},
-				listeners = {},
-				bound = {},
-				checkpoints = 0,
-				changedAt = os.clock(),
-				dirty = true,
+				blocked = {},
+				crossings = 0,
 			}
 			Finale.session = session
 			table.insert(App.cleanups, function()
@@ -31309,104 +31057,60 @@ do
 					Finale.session = nil
 				end
 			end)
-			local deadline = os.clock() + 1800
-			while active(generation) and os.clock() < deadline do
-				Finale.objective(session, generation)
+			while active(generation) do
+				Finale.bind(session)
 				Finale.index(session)
 				if Finale.completed() then
 					App.rows.hollow = "Finale finished"
 					return true, "Finale finished"
 				end
-				local packet = session.objective
-				local detail = packet and packet.text or "Waiting for the next objective"
 				if session.exiting then
-					status("Leaving the finale", "Finishing the ending", 0.99)
-				elseif App.player:GetAttribute("InFinale") ~= true then
-					status("Waiting for the finale", "Waiting for your character", 0.05)
+					status("Finishing the ending", "", 0.99)
 				elseif not Finale.ready(session, generation) then
-					EventInput.release(session)
-					status("Finale", detail, App.progress)
+					status("Finale", "Waiting for your character", App.progress)
 				else
 					if session.character ~= App.player.Character then
-						session.character, session.visited, session.retry, session.section =
-							App.player.Character, {}, {}, nil
+						session.character, session.visited, session.retry, session.blocked =
+							App.player.Character, {}, {}, {}
+						session.section, session.owner, session.safe, session.locateAt = nil, nil, nil, 0
 					end
 					local entry = Finale.entries(session)[1]
 					if entry then
-						local titles = {
-							key = "Getting a key",
-							lock = "Unlocking the gate",
-							checkpoint = "Crossing the course",
-							portal = "Leaving this section",
-							prompt = "Finishing the task",
-							exit = "Heading to the exit",
-						}
-						status(titles[entry.kind], detail, math.min(0.95, 0.08 + session.checkpoints * 0.025))
+						status(
+							entry.kind == "exit" and "Heading to the exit" or "Next portal",
+							"",
+							math.min(0.95, 0.05 + session.crossings * 0.025)
+						)
 						Finale.step(session, entry, generation)
 					else
-						status("Finale", detail, App.progress)
+						status("Waiting for the next portal", "", App.progress)
 						Finale.stream(session, generation)
 					end
 				end
-				if os.clock() - session.changedAt > (session.exiting and 180 or 120) then
-					return false,
-						session.exiting and "The ending hasn't saved yet. Check your Hollow progress."
-							or "Can't reach the next task. Move a little further into the course, then press Start."
-				end
-				if not pause(0.15, generation) then
+				if not pause(0.2, generation) then
 					break
 				end
 			end
-			return false, active(generation) and "The finale took too long. Press Start to continue." or "Stopped"
-		end
-
-		function Finale.clearMarkers()
-			Finale.markers = false
-			Finale.epoch = (Finale.epoch or 0) + 1
-			for _, visual in pairs(Finale.visuals) do
-				visual.highlight:Destroy()
-				visual.billboard:Destroy()
-			end
-			Finale.visuals = {}
+			return false, "Stopped"
 		end
 
 		function Finale.draw()
-			local items, keep = {}, {}
-			local _, root = character()
+			local session = Finale.session or { items = {}, visited = {}, retry = {}, blocked = {}, crossings = 0 }
+			Finale.index(session)
+			local keep, choices = {}, {}
 			if App.player:GetAttribute("InFinale") == true then
-				for tag, kind in pairs(tags) do
-					for _, object in ipairs(Collection:GetTagged(tag)) do
-						local part = App.day8.part(object)
-						local zone = workspace:FindFirstChild("FinaleZone")
-						if
-							part
-							and zone
-							and Finale.physical(object)
-							and object:IsDescendantOf(zone)
-							and not Finale.reserved[object]
-							and (kind ~= "portal" or object.Name == "SectionPortal" and object:GetAttribute("Enabled") ~= false)
-							and (kind ~= "key" or not Finale.key(tonumber(object:GetAttribute("Index"))))
-						then
-							table.insert(items, { object = object, part = part, kind = kind })
-						end
-					end
-				end
+				choices = Finale.entries(session)
 			end
-			if root then
-				table.sort(items, function(a, b)
-					return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
-				end)
-			end
-			for index, entry in ipairs(items) do
-				if index > 20 then
+			for index, entry in ipairs(choices) do
+				if index > 1 then
 					break
 				end
 				local visual = Finale.visuals[entry.object]
 				if not visual then
 					local highlight = Instance.new("Highlight")
 					highlight.Adornee, highlight.Parent = entry.part, App.gui
-					highlight.FillTransparency, highlight.DepthMode = 0.85, Enum.HighlightDepthMode.AlwaysOnTop
-					highlight.OutlineColor = colors.mint
+					highlight.FillTransparency, highlight.DepthMode, highlight.OutlineColor =
+						0.85, Enum.HighlightDepthMode.AlwaysOnTop, colors.mint
 					local billboard = Instance.new("BillboardGui")
 					billboard.Size, billboard.StudsOffset, billboard.AlwaysOnTop =
 						UDim2.fromOffset(170, 42), Vector3.new(0, 3, 0), true
@@ -31416,16 +31120,7 @@ do
 					visual = { highlight = highlight, billboard = billboard, text = text }
 					Finale.visuals[entry.object] = visual
 				end
-				local names = {
-					key = "Key",
-					lock = "Key lock",
-					gate = "Gate",
-					checkpoint = "Checkpoint",
-					exit = "Final exit",
-					portal = "Next section",
-				}
-				visual.text.Text = names[entry.kind]
-					.. (root and "\n" .. math.floor((entry.part.Position - root.Position).Magnitude) .. " studs" or "")
+				visual.text.Text = entry.kind == "exit" and "Final exit" or "Next portal"
 				keep[entry.object] = true
 			end
 			for object, visual in pairs(Finale.visuals) do
@@ -31452,14 +31147,6 @@ do
 				end)
 			end
 			refresh()
-		end
-
-		function Finale.clear()
-			Finale.clearMarkers()
-			if Finale.session then
-				Finale.close(Finale.session)
-				Finale.session = nil
-			end
 		end
 		App.finale = Finale
 	end)()
