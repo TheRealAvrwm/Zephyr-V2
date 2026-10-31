@@ -19941,6 +19941,7 @@ do
 		local model, root = character()
 		local camera = workspace.CurrentCamera
 		return active(generation)
+			and (not session.manual or not App.running)
 			and model == session.model
 			and root
 			and not root.Anchored
@@ -21137,6 +21138,7 @@ do
 		end
 		return false, active(generation) and "The Hospital helper reached its time limit" or "Stopped"
 	end
+	App.hospitalApi = Hospital
 	runners.hospital = Hospital.run
 end
 do
@@ -27682,6 +27684,7 @@ local function start()
 		status("Play this one in the game", current.objective, 0)
 		return
 	end
+	if App.qol then App.qol.suspendInputs() end
 	App.running = true
 	App.generation += 1
 	local generation = App.generation
@@ -29774,6 +29777,740 @@ do
 	end)()
 end
 
+-- discord + manual helpers
+do
+	(function()
+		local Qol = { invite = "discord.gg/ntGXMJsVB5", code = "ntGXMJsVB5", visuals = {}, epoch = 0 }
+
+		-- invite
+		function Qol.noticeKey()
+			return tostring(App.player.UserId) .. "_" .. Qol.code
+		end
+		function Qol.noticeSeen()
+			local key = Qol.noticeKey()
+			local remembered = env.__HOLLOW_COMMUNITY_SEEN
+			if type(remembered) == "table" and remembered[key] then
+				return true
+			end
+			if type(readfile) == "function" then
+				local ok, value = pcall(readfile, "zephyr-hollow-discord-" .. App.player.UserId .. ".txt")
+				if ok and value == Qol.code then
+					return true
+				end
+			end
+			return false
+		end
+		function Qol.rememberNotice()
+			if type(env.__HOLLOW_COMMUNITY_SEEN) ~= "table" then
+				env.__HOLLOW_COMMUNITY_SEEN = {}
+			end
+			env.__HOLLOW_COMMUNITY_SEEN[Qol.noticeKey()] = true
+			if type(writefile) == "function" then
+				Qol.saved = pcall(writefile, "zephyr-hollow-discord-" .. App.player.UserId .. ".txt", Qol.code)
+			end
+		end
+		function Qol.copyInvite()
+			local copy = type(setclipboard) == "function" and setclipboard or toclipboard
+			if type(copy) == "function" and pcall(copy, "https://" .. Qol.invite) then
+				if ui.discordCopy then
+					ui.discordCopy.Text = "Invite copied"
+				end
+				return true
+			end
+			if ui.discordText then
+				ui.discordText.Visible = true
+				ui.discordText:CaptureFocus()
+			end
+			return false
+		end
+		function Qol.dismissNotice()
+			if Qol.notice then
+				Qol.notice:Destroy()
+				Qol.notice = nil
+			end
+		end
+		function Qol.mount()
+			local ok, tween = pcall(function()
+				return game:GetService("TweenService"):Create(
+					ui.discordLink,
+					TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+					{ TextColor3 = Color3.fromRGB(190, 170, 255) }
+				)
+			end)
+			if ok then
+				Qol.pulse = tween
+				local function visibility()
+					if ui.panel.Visible then
+						tween:Play()
+					else
+						tween:Pause()
+					end
+				end
+				connect(ui.panel:GetPropertyChangedSignal("Visible"), visibility)
+				visibility()
+			end
+			if Qol.noticeSeen() then
+				return
+			end
+			Qol.rememberNotice()
+			local card = new(
+				"Frame",
+				ui.panel,
+				{
+					Name = "DiscordWelcome",
+					Position = UDim2.fromOffset(12, 68),
+					Size = UDim2.new(1, -24, 0, 196),
+					BackgroundColor3 = colors.raised,
+					ZIndex = 30,
+					Active = true,
+				}
+			)
+			rounded(card, 10)
+			Qol.notice = card
+			local title = label(card, "Join the Zephyr Discord", UDim2.fromOffset(16, 12), UDim2.new(1, -32, 0, 28), 17)
+			title.Font, title.ZIndex = Enum.Font.GothamBold, 31
+			local link = label(card, Qol.invite, UDim2.fromOffset(16, 44), UDim2.new(1, -32, 0, 25), 16, colors.mint)
+			link.ZIndex, link.TextScaled = 31, true
+			new("UITextSizeConstraint", link, { MinTextSize = 10, MaxTextSize = 16 })
+			local text = label(
+				card,
+				"Updates, help and the official script.\nSharing a showcase? Leave the invite too.",
+				UDim2.fromOffset(16, 74),
+				UDim2.new(1, -32, 0, 54),
+				12,
+				colors.muted
+			)
+			text.ZIndex = 31
+			local copy =
+				button(card, "Copy invite", UDim2.new(0, 12, 1, -56), UDim2.new(0.5, -18, 0, 44), Qol.copyInvite)
+			local close =
+				button(card, "Got it", UDim2.new(0.5, 6, 1, -56), UDim2.new(0.5, -18, 0, 44), Qol.dismissNotice)
+			copy.ZIndex, close.ZIndex = 31, 31
+			copy.BackgroundColor3, copy.TextColor3 = colors.mint, colors.base
+			task.delay(12, function()
+				if Qol.notice == card then
+					Qol.dismissNotice()
+				end
+			end)
+		end
+
+		-- hospital
+		function Qol.session()
+			if Qol.hospital then
+				return Qol.hospital
+			end
+			local session = {
+				manual = true,
+				model = character(),
+				bound = {},
+				objects = {},
+				rooms = {},
+				retry = {},
+				clicked = setmetatable({}, { __mode = "k" }),
+				queue = { workspace },
+				head = 1,
+			}
+			local api = App.hospitalApi
+			local function add(object)
+				if object:IsA("ProximityPrompt") or object:IsA("ClickDetector") then
+					session.objects[object] = true
+					local room = api.room(object)
+					if room then
+						session.rooms[room] = true
+					end
+				end
+			end
+			session.add = add
+			session.bound.added = workspace.DescendantAdded:Connect(add)
+			session.bound.removed = workspace.DescendantRemoving:Connect(function(object)
+				session.objects[object], session.rooms[object], session.retry[object] = nil, nil, nil
+			end)
+			Qol.hospital = session
+			return session
+		end
+		function Qol.hospitalScan(session)
+			local api, start = App.hospitalApi, os.clock()
+			api.bind(session)
+			if not session.lib and not session.libLoading and os.clock() >= (session.libRetry or 0) then
+				session.libLoading, session.libRetry = true, os.clock() + 6
+				task.spawn(function()
+					local ok, lib = pcall(module, Storage:FindFirstChild("Lib"))
+					if Qol.hospital == session and App.alive then
+						session.lib = ok and lib or nil
+					end
+					session.libLoading = false
+				end)
+			end
+			for _ = 1, 250 do
+				local object = session.queue[session.head]
+				if not object then
+					break
+				end
+				session.head += 1
+				session.add(object)
+				for _, child in ipairs(object:GetChildren()) do
+					table.insert(session.queue, child)
+				end
+				if os.clock() - start > 0.002 then
+					break
+				end
+			end
+			if session.head > #session.queue then
+				session.queue, session.head = {}, 1
+			end
+			local model = character()
+			if model ~= session.model then
+				EventInput.release(session)
+				session.model, session.clicked = model, setmetatable({}, { __mode = "k" })
+			end
+		end
+		function Qol.entry(object, title, extra)
+			local part = App.day8.part(object)
+			if not part and object then
+				part = App.day8.part(object.Parent)
+			end
+			if not part then
+				return nil
+			end
+			local entry = extra or {}
+			entry.object, entry.part, entry.title = object, part, title
+			return entry
+		end
+		function Qol.hospitalItems()
+			local session, api, items = Qol.session(), App.hospitalApi, {}
+			Qol.hospitalScan(session)
+			local text = api.objective(session)
+			local target = api.target(session)
+			local object, tool = api.pick(session, text)
+			Qol.nextObject, Qol.nextTool = object, tool
+			local nextEntry = Qol.entry(
+				object or target,
+				"NEXT: " .. (object and object:IsA("ProximityPrompt") and object.ActionText or text)
+			)
+			if nextEntry then
+				table.insert(items, nextEntry)
+			end
+			local needed, held = api.needs(session), api.held()
+			local wanted = {}
+			for name in pairs(needed) do
+				if not held[name] then
+					table.insert(wanted, name)
+				end
+			end
+			table.sort(wanted)
+			Qol.detail = tostring(text) .. (#wanted > 0 and "\nNeed: " .. table.concat(wanted, ", ") or "")
+			for prompt in pairs(session.objects) do
+				if prompt.Parent and prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt ~= object then
+					local action = api.text(prompt.ActionText)
+					local supply = needed[action] and not held[action]
+					if supply or target and api.related(prompt, target) then
+						local entry = Qol.entry(prompt, supply and "GET: " .. prompt.ActionText or prompt.ActionText)
+						if entry then
+							table.insert(items, entry)
+						end
+					end
+				end
+			end
+			return items, nextEntry
+		end
+		function Qol.miniVisible()
+			for _, names in ipairs({
+				{ "Minigame", "Frame" },
+				{ "DNAMinigame", "Frame" },
+				{ "BarMinigame", "Base" },
+				{ "HeartbeatMinigameUI", "Frame" },
+			}) do
+				local object = getPath(App.player, "PlayerGui", table.unpack(names))
+				if object and App.hospitalApi.visible(object) then
+					return true
+				end
+			end
+			return false
+		end
+		function Qol.hospitalAssist()
+			if App.running or Qol.busy then
+				return
+			end
+			local session, api = Qol.session(), App.hospitalApi
+			if Qol.taps and Qol.miniVisible() then
+				api.ui(session)
+				return
+			end
+			if Qol.miniVisible() then
+				return
+			end
+			local inspected = api.inspecting(session)
+			local _, root = character()
+			if not root or not api.ready(session) then
+				return
+			end
+			if Qol.taps then
+				for object in pairs(session.objects) do
+					local machine = object.Parent and object:IsA("ClickDetector") and api.machine(object)
+					local point = machine and EventInput.point(object.Parent)
+					if
+						point
+						and api.busy(machine)
+						and api.available(machine)
+						and (not inspected or api.related(machine, inspected))
+						and (root.Position - point).Magnitude <= math.min(10, object.MaxActivationDistance)
+						and os.clock() >= (session.retry[object] or 0)
+					then
+						session.retry[object] = os.clock() + 0.15
+						api.click(session, object)
+						EventInput.release(session)
+						return
+					end
+				end
+			end
+			if inspected then
+				return
+			end
+			local prompt = Qol.prompts and Qol.nextObject
+			local point = prompt and prompt.Parent and prompt:IsA("ProximityPrompt") and EventInput.point(prompt.Parent)
+			if
+				not point
+				or (root.Position - point).Magnitude > prompt.MaxActivationDistance * 0.9
+				or os.clock() < (session.retry[prompt] or 0)
+			then
+				return
+			end
+			local tool = Qol.nextTool
+			if tool and tool.Parent ~= session.model then
+				return
+			end
+			local revision = session.revision
+			session.retry[prompt] = os.clock() + 2
+			api.hold(session, prompt, nil, function()
+				return Qol.prompts and not App.running and api.ready(session) and session.revision == revision
+			end)
+			EventInput.release(session)
+		end
+
+		-- warden
+		function Qol.loadWarden()
+			if Qol.loading then
+				return
+			end
+			Qol.loading = true
+			local epoch = Qol.epoch
+			task.spawn(function()
+				pcall(function()
+					for _, name in ipairs({
+						"Objective",
+						"SpawnedConsumableClient",
+						"GameplayStateService",
+						"HollowClawStrike",
+						"StainBossHits",
+						"PlayerWrapper",
+						"ConsumablesService",
+					}) do
+						if not App.alive or Qol.epoch ~= epoch then
+							break
+						end
+						App.day8.load(name)
+					end
+				end)
+				Qol.loading = false
+			end)
+		end
+		function Qol.wardenItems()
+			local day, items, candidates = App.day8, {}, {}
+			local threats = day.sonariaThreats()
+			local objectiveApi = day.modules.Objective
+			local activeObjective = objectiveApi and objectiveApi.GetActiveInteraction()
+			local activeEntry
+			for _, entry in ipairs(day.objectiveItems()) do
+				local locked = entry.object:GetAttribute("Locked") == true
+					or entry.native and entry.native.LockedObjective == true
+				entry.title = locked and "Locked infection"
+					or "Infection | " .. tostring(entry.object:GetAttribute("Health") or "")
+				table.insert(items, entry)
+				if entry.native and entry.native == activeObjective then
+					activeEntry = entry
+				end
+				local available = not locked
+				if entry.native and type(entry.native.CanInteract) == "function" then
+					local ok, result = pcall(entry.native.CanInteract, entry.native)
+					available = available and ok and result == true
+				end
+				if available and day.clearance(entry.part.Position, threats) > 24 then
+					table.insert(candidates, entry)
+				end
+			end
+			for _, entry in ipairs(threats) do
+				table.insert(items, entry)
+			end
+			local api = day.modules.SpawnedConsumableClient
+			for _, native in pairs(api and api.GetAll and api.GetAll() or {}) do
+				if not native.Claimed and not native.Claiming then
+					local entry = Qol.entry(
+						native.SpawnPart,
+						tostring(native.ConsumableType or "Supply"),
+						{ supply = true, native = native }
+					)
+					if entry then
+						table.insert(items, entry)
+					end
+				end
+			end
+			local nextEntry = activeEntry or day.nearest(candidates)
+			local _, gap = day.nearest(threats)
+			local hits, strike = day.modules.StainBossHits, day.modules.HollowClawStrike
+			if hits and hits.IsActive() then
+				local boss = strike and strike.GetBossRoot()
+				local entry = Qol.entry(boss, "Hollow boss", { threat = true })
+				if entry then
+					table.insert(items, entry)
+					nextEntry = entry
+				end
+				Qol.detail = (
+					hits.IsHittable() and "BOSS OPEN: throw a Hollow Claw" or "Boss protected. Wait for the opening."
+				)
+				if type(hits.GetHealthFraction) == "function" then
+					Qol.detail ..= "\nBoss health: " .. math.floor(math.clamp(hits.GetHealthFraction(), 0, 1) * 100) .. "%"
+				end
+			else
+				Qol.detail = activeEntry and "Clearing this infection"
+					or nextEntry and "Follow the line to a safer infection"
+					or "Waiting for an available infection"
+			end
+			Qol.warning = gap and gap < 45 and "MONSTER: " .. math.floor(gap) .. " studs" or nil
+			return items, nextEntry
+		end
+		function Qol.wardenTaps()
+			if App.running or not Qol.taps then
+				return
+			end
+			local api = App.day8.modules.Objective
+			local object = api and api.GetActiveInteraction()
+			local target = object and object.ActiveMaid and object.ActiveMaid.ClickMinigame
+			target = target and target.ActiveTarget
+			if
+				object
+				and object.Active
+				and not object.ActiveSkillCheck
+				and target
+				and target.Instance
+				and target.Instance.Visible
+				and target.Config
+				and type(target.Config.OnClick) == "function"
+				and os.clock() >= (Qol.tapAt or 0)
+			then
+				Qol.tapAt = os.clock() + 0.12
+				target.Config.OnClick()
+			end
+		end
+		function Qol.throwClaw()
+			if App.running or Qol.busy then
+				return false
+			end
+			local modules, day = App.day8.modules, App.day8
+			local hits, strike, wrapperApi, service =
+				modules.StainBossHits, modules.HollowClawStrike, modules.PlayerWrapper, modules.ConsumablesService
+			if
+				not hits
+				or not strike
+				or not wrapperApi
+				or not service
+				or not hits.IsActive()
+				or not hits.IsHittable()
+				or not day.ready()
+			then
+				return false
+			end
+			local wrapper = wrapperApi.getWrapperFromPlayer(App.player)
+			local hotbar = wrapper and wrapper.PlayerData and wrapper.PlayerData:FindFirstChild("Hotbar")
+			local slot
+			for _, item in ipairs(hotbar and hotbar:GetChildren() or {}) do
+				if item:IsA("StringValue") and item.Value == "HollowClaw" then
+					slot = item
+					break
+				end
+			end
+			local boss = strike.GetBossRoot()
+			if not slot or not boss or service.CanUseConsumable(App.player, slot.Name) ~= true then
+				return false
+			end
+			Qol.busy = true
+			local session = {}
+			local ok, used = pcall(function()
+				strike.OnHotbarSlotPressed(slot)
+				App.event7.face(session, boss)
+				if not pause(0.08) or App.running or not day.ready() or not hits.IsHittable() then
+					return false
+				end
+				local _, aimed = strike.GetAim()
+				if aimed and service.CanUseConsumable(App.player, slot.Name) == true then
+					return service.UseConsumable(slot.Name) ~= false
+				end
+				return false
+			end)
+			EventInput.release(session)
+			Qol.busy = false
+			return ok and used == true
+		end
+
+		-- guides
+		function Qol.clearVisuals()
+			for _, visual in pairs(Qol.visuals) do
+				visual.highlight:Destroy()
+				visual.billboard:Destroy()
+			end
+			Qol.visuals = {}
+			if Qol.line then
+				Qol.line.beam:Destroy()
+				Qol.line.first:Destroy()
+				Qol.line.last:Destroy()
+				Qol.line = nil
+			end
+			if Qol.hud then
+				Qol.hud:Destroy()
+				Qol.hud = nil
+			end
+		end
+		function Qol.draw(items, nextEntry)
+			local _, root = character()
+			if not root then
+				Qol.clearVisuals()
+				return
+			end
+			local keep = {}
+			if Qol.markers then
+				table.sort(items, function(a, b)
+					if a == b then
+						return false
+					end
+					if a == nextEntry then
+						return true
+					end
+					if b == nextEntry then
+						return false
+					end
+					return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+				end)
+				for index, entry in ipairs(items) do
+					if index > 22 then
+						break
+					end
+					local visual = Qol.visuals[entry.object]
+					if not visual then
+						local highlight = new(
+							"Highlight",
+							App.gui,
+							{
+								Adornee = entry.part,
+								FillTransparency = 0.88,
+								DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+								OutlineColor = entry.threat and colors.coral or colors.mint,
+							}
+						)
+						local billboard = new(
+							"BillboardGui",
+							App.gui,
+							{
+								Adornee = entry.part,
+								AlwaysOnTop = true,
+								StudsOffset = Vector3.new(0, 3, 0),
+								Size = UDim2.fromOffset(190, 48),
+							}
+						)
+						local text = label(
+							billboard,
+							"",
+							UDim2.fromOffset(0, 0),
+							UDim2.fromScale(1, 1),
+							12,
+							highlight.OutlineColor
+						)
+						text.TextStrokeTransparency = 0.2
+						visual = { highlight = highlight, billboard = billboard, text = text }
+						Qol.visuals[entry.object] = visual
+					end
+					visual.text.Text = entry.title
+						.. "\n"
+						.. math.floor((entry.part.Position - root.Position).Magnitude)
+						.. " studs"
+					keep[entry.object] = true
+				end
+			end
+			for object, visual in pairs(Qol.visuals) do
+				if not keep[object] then
+					visual.highlight:Destroy()
+					visual.billboard:Destroy()
+					Qol.visuals[object] = nil
+				end
+			end
+			if Qol.guide then
+				if not Qol.hud then
+					Qol.hud = label(App.gui, "", UDim2.new(0.5, -145, 0, 72), UDim2.fromOffset(290, 70), 13)
+					Qol.hud.TextStrokeTransparency = 0.25
+				end
+				Qol.hud.Text = (Qol.warning and Qol.warning .. "\n" or "") .. tostring(Qol.detail or "")
+				Qol.hud.TextColor3 = Qol.warning and colors.coral or colors.text
+				if nextEntry and nextEntry.part.Parent then
+					if not Qol.line then
+						local first, last = Instance.new("Attachment"), Instance.new("Attachment")
+						local beam = new(
+							"Beam",
+							first,
+							{
+								Attachment0 = first,
+								Attachment1 = last,
+								Width0 = 0.08,
+								Width1 = 0.08,
+								FaceCamera = true,
+								Color = ColorSequence.new(colors.mint),
+								LightEmission = 0.6,
+								Segments = 1,
+							}
+						)
+						Qol.line = { first = first, last = last, beam = beam }
+					end
+					Qol.line.first.Parent, Qol.line.last.Parent = root, nextEntry.part
+					Qol.line.beam.Enabled = true
+				elseif Qol.line then
+					Qol.line.beam.Enabled = false
+				end
+			else
+				if Qol.hud then
+					Qol.hud:Destroy()
+					Qol.hud = nil
+				end
+				if Qol.line then
+					Qol.line.beam.Enabled = false
+				end
+			end
+		end
+		function Qol.enabled()
+			return Qol.markers or Qol.guide or Qol.taps or Qol.prompts
+		end
+		function Qol.watch()
+			if Qol.watching or not Qol.enabled() then
+				return
+			end
+			Qol.watching = true
+			local epoch = Qol.epoch
+			if current.id == "sonariaescape" then
+				Qol.loadWarden()
+			end
+			task.spawn(function()
+				local nextDraw, nextLoad = 0, os.clock() + 5
+				while App.alive and Qol.epoch == epoch and Qol.enabled() do
+					local ok = pcall(function()
+						if os.clock() >= nextDraw then
+							nextDraw = os.clock() + 0.35
+							local items, nextEntry
+							if current.id == "hospital" then
+								items, nextEntry = Qol.hospitalItems()
+							else
+								items, nextEntry = Qol.wardenItems()
+							end
+							Qol.nextEntry = nextEntry
+							Qol.draw(items, nextEntry)
+							if ui.manualInfo then
+								ui.manualInfo.Text = Qol.detail or "Waiting for your next task"
+							end
+						end
+						if current.id == "hospital" then
+							Qol.hospitalAssist()
+						else
+							Qol.wardenTaps()
+							if os.clock() >= nextLoad then
+								nextLoad = os.clock() + 8
+								Qol.loadWarden()
+							end
+						end
+					end)
+					if not ok and Qol.hospital then
+						EventInput.release(Qol.hospital)
+					end
+					task.wait(0.05)
+				end
+				if Qol.epoch == epoch then
+					Qol.watching = false
+					Qol.clearVisuals()
+				end
+			end)
+		end
+		function Qol.toggle(key)
+			Qol[key] = not Qol[key]
+			if not Qol.enabled() then
+				Qol.clearHelpers()
+			else
+				Qol.watch()
+			end
+			refresh()
+		end
+		function Qol.goToTask()
+			if current.id ~= "hospital" or App.running or Qol.busy then
+				return false
+			end
+			local _, entry = Qol.hospitalItems()
+			if not entry then
+				return false
+			end
+			Qol.busy = true
+			local epoch = Qol.epoch
+			local ok, moved = pcall(approach, entry.part.Position, nil, nil, false, function()
+				return not App.running
+					and Qol.epoch == epoch
+					and App.hospitalApi.ready(Qol.session())
+					and entry.part.Parent ~= nil
+			end)
+			Qol.busy = false
+			return ok and moved == true
+		end
+		function Qol.solvePicture()
+			if current.id ~= "hospital" or App.running or Qol.busy then
+				return false
+			end
+			local session, api = Qol.session(), App.hospitalApi
+			Qol.hospitalScan(session)
+			local puzzle = getPath(workspace, "Halloween", "Puzzle")
+			if not puzzle or not api.pictureRequested(session, puzzle) then
+				return false
+			end
+			local epoch = Qol.epoch
+			Qol.busy = true
+			local ok, solved = pcall(api.solve, session, puzzle, nil, function()
+				return not App.running and Qol.epoch == epoch and api.pictureRequested(session, puzzle)
+			end)
+			EventInput.release(session)
+			Qol.busy = false
+			return ok and solved == true
+		end
+		function Qol.clearHelpers()
+			Qol.epoch, Qol.watching = Qol.epoch + 1, false
+			Qol.markers, Qol.guide, Qol.taps, Qol.prompts = false, false, false, false
+			Qol.clearVisuals()
+			local session = Qol.hospital
+			Qol.hospital = nil
+			if session then
+				EventInput.release(session)
+				for _, connection in pairs(session.bound) do
+					pcall(connection.Disconnect, connection)
+				end
+			end
+		end
+		function Qol.suspendInputs()
+			if Qol.hospital then
+				EventInput.release(Qol.hospital)
+			end
+		end
+		function Qol.clear()
+			Qol.clearHelpers()
+			Qol.dismissNotice()
+			if Qol.pulse then
+				Qol.pulse:Cancel()
+				Qol.pulse = nil
+			end
+		end
+		App.qol = Qol
+	end)()
+end
+
+
 -- menu
 local function buildUI(parent)
 	local gui = new("ScreenGui", parent, {
@@ -29826,6 +30563,10 @@ local function buildUI(parent)
 	new("UITextSizeConstraint", heading, { MinTextSize = 10, MaxTextSize = 19 })
 	local subtitle =
 		label(header, "ZEPHYR  /  EVENT RUNNER", UDim2.fromOffset(65, 37), UDim2.new(1, -69, 0, 20), 10, colors.muted)
+	ui.discordLink = subtitle
+	subtitle.Text, subtitle.TextColor3, subtitle.TextScaled = App.qol.invite, colors.mint, true
+	subtitle.Font = Enum.Font.GothamBold
+	new("UITextSizeConstraint", subtitle, { MinTextSize = 8, MaxTextSize = 13 })
 	local minimize = button(panel, "-", UDim2.new(1, -108, 0, 12), UDim2.fromOffset(44, 44), function()
 		ui.setVisible(false)
 	end)
@@ -29927,6 +30668,45 @@ local function buildUI(parent)
 			end
 		end)
 	end)
+	ui.discordCopy = button(event, App.qol.invite, UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+		App.qol.copyInvite()
+	end)
+	ui.discordText = new("TextBox", event, { Name = "DiscordInvite", Text = "https://" .. App.qol.invite,
+		ClearTextOnFocus = false, Visible = false, Size = UDim2.new(1, -8, 0, 44),
+		BackgroundColor3 = colors.raised, TextColor3 = colors.mint, TextSize = 13, Font = Enum.Font.Gotham })
+	if current and (current.id == "hospital" or current.id == "sonariaescape") then
+		label(event, "Manual helpers", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 26), 14)
+		ui.manualButtons = {}
+		local options = current.id == "hospital" and { {"guide", "Task guide + HUD"}, {"markers", "Task + supply ESP"}, {"prompts", "Nearby task holds"}, {"taps", "Minigame + typing assist"} }
+			or { {"guide", "Infection guide + warnings"}, {"markers", "Infection + supply ESP"}, {"taps", "Infection tap assist"} }
+		for _, option in ipairs(options) do
+			local key, title = option[1], option[2]
+			local control = button(event, title .. ": OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				App.qol.toggle(key)
+			end)
+			control.Name = "Manual_" .. key
+			ui.manualButtons[key] = { control = control, title = title }
+		end
+		ui.manualAction = button(event, current.id == "hospital" and "Go to current task" or "Aim + throw held Hollow Claw",
+			UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				task.spawn(function()
+					local ok, result = pcall(current.id == "hospital" and App.qol.goToTask or App.qol.throwClaw)
+					if ui.manualInfo and App.alive then
+						ui.manualInfo.Text = ok and result and "Done" or (current.id == "hospital" and "No task target yet. Turn on Task guide to track it."
+							or "Carry a Hollow Claw and wait for the boss opening. Use the guide to find supplies.")
+					end
+				end)
+			end)
+		ui.manualInfo = label(event, "Helpers work without Start. You control where you go.", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 72), 12, colors.muted)
+		if current.id == "hospital" then
+			ui.manualPicture = button(event, "Solve active candy picture", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				task.spawn(function()
+					local ok, result = pcall(App.qol.solvePicture)
+					if App.alive then ui.manualInfo.Text = ok and result and "Picture solved" or "Stand by the picture when the task asks you to solve it." end
+				end)
+			end)
+		end
+	end
 	if current and current.id == "duels" then
 		App.duelsMelee = App.duelsMelee ~= false
 		App.duelsMode = App.duelsMode or "TP Knife"
@@ -30409,6 +31189,12 @@ local function buildUI(parent)
 				setProperty(ui[key], "TextColor3", enabled and colors.base or colors.text)
 			end
 		end
+		for key, item in pairs(ui.manualButtons or {}) do
+			local enabled = App.qol[key] == true
+			setProperty(item.control, "Text", item.title .. (enabled and ": ON" or ": OFF"))
+			setProperty(item.control, "BackgroundColor3", enabled and colors.mint or colors.raised)
+			setProperty(item.control, "TextColor3", enabled and colors.base or colors.text)
+		end
 		if ui.megaAssist then
 			local enabled = App.mega.assist == true
 			setProperty(ui.megaAssist, "Text", "Nearby prompt assist: " .. (enabled and "ON" or "OFF"))
@@ -30709,6 +31495,7 @@ local function buildUI(parent)
 	layout()
 	refresh()
 	ui.setVisible(true)
+	App.qol.mount()
 end
 
 App.unload = function()
@@ -30718,6 +31505,9 @@ App.unload = function()
 	App.unloading = true
 	App.generation += 1
 	App.running = false
+	if App.qol then
+		pcall(App.qol.clear)
+	end
 	if App.day9 then
 		pcall(App.day9.clear)
 	end
