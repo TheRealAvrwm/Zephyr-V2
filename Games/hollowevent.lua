@@ -30534,6 +30534,129 @@ do
 			["%WindowPortal"] = "portal",
 		}
 
+		function Finale.physical(object)
+			local parent = object
+			while parent and parent ~= workspace do
+				if parent:IsA("WorldModel") or parent:IsA("ViewportFrame") or parent:IsA("LayerCollector") then
+					return false
+				end
+				parent = parent.Parent
+			end
+			return parent == workspace
+		end
+
+		function Finale.floor(point, section, model, height, spread, ignore)
+			local params = RaycastParams.new()
+			params.FilterType, params.RespectCanCollide, params.IgnoreWater = Enum.RaycastFilterType.Exclude, true, true
+			local excluded = { model }
+			if ignore then
+				table.insert(excluded, ignore)
+			end
+			params.FilterDescendantsInstances = excluded
+			local center, level
+			for _, offset in ipairs({
+				Vector3.zero,
+				Vector3.new(spread, 0, spread),
+				Vector3.new(-spread, 0, spread),
+				Vector3.new(spread, 0, -spread),
+				Vector3.new(-spread, 0, -spread),
+			}) do
+				local hit = workspace:Raycast(
+					Vector3.new(point.X, height + 5, point.Z) + offset,
+					Vector3.new(0, -10, 0),
+					params
+				)
+				if
+					not hit
+					or hit.Normal.Y < 0.8
+					or not hit.Instance
+					or not hit.Instance.CanCollide
+					or not Finale.physical(hit.Instance)
+					or math.abs(hit.Position.Y - height) > 3
+					or hit.Position.Y < workspace.FallenPartsDestroyHeight + 32
+				then
+					return nil
+				end
+				local ownSection = Finale.section(hit.Instance)
+				if section and ownSection and section ~= ownSection then
+					return nil
+				end
+				local name = hit.Instance.Name:lower()
+				if
+					name:find("lava", 1, true)
+					or name:find("kill", 1, true)
+					or name:find("void", 1, true)
+					or type(hit.Instance.HasTag) == "function" and hit.Instance:HasTag("%KillBrick")
+				then
+					return nil
+				end
+				if level and math.abs(level - hit.Position.Y) > 1 then
+					return nil
+				end
+				center, level = center or hit.Position, hit.Position.Y
+			end
+			return center
+		end
+
+		function Finale.portalStand(session, entry, portal, generation)
+			local model, root, humanoid = character()
+			local surface, size = portal.surfaceCFrame, portal.surfaceSize
+			if not model or not surface or not size or math.abs(surface.UpVector.Y) < 0.85 then
+				return nil
+			end
+			call("Finale door streaming", function()
+				App.player:RequestStreamAroundAsync(surface.Position, 1)
+			end, 1.5, generation)
+			if not active(generation) or App.player.Character ~= model then
+				return nil
+			end
+			local height = surface.Position.Y - size.Y / 2
+			local spread = math.max(1.2, (root.Size.X + root.Size.Z) / 4 + 0.25)
+			local normal, right = surface.ZVector, surface.RightVector
+			local side = (root.Position - surface.Position):Dot(normal) >= 0 and 1 or -1
+			local best, score
+			for _, direction in ipairs({ side, -side }) do
+				for _, distance in ipairs({ 4, 6, 8 }) do
+					for _, shift in ipairs({ 0, -1, 1 }) do
+						local point = surface.Position + normal * distance * direction + right * shift
+						local floor = Finale.floor(point, entry.section, model, height, spread, entry.part)
+						if floor then
+							local gap = (floor - root.Position).Magnitude + (direction == side and 0 or 20)
+							if not score or gap < score then
+								best, score = floor, gap
+							end
+						end
+					end
+				end
+			end
+			if not best then
+				return nil
+			end
+			local clearance = math.max(2.6, humanoid.HipHeight + root.Size.Y / 2)
+			local origin = Finale.floor(root.Position, nil, model, root.Position.Y - clearance, 0.8)
+			return best,
+				origin and { frame = model:GetPivot(), point = root.Position, model = model, section = entry.section }
+					or session.safe and session.safe.section == entry.section and session.safe
+					or nil
+		end
+
+		function Finale.recover(session, entry, origin, model, root, generation)
+			session.blocked = session.blocked or {}
+			session.blocked[entry.object] = true
+			if
+				origin
+				and origin.model == model
+				and active(generation)
+				and App.player.Character == model
+				and not root.Anchored
+				and not session.client.isLocked("CharacterBusyState")
+			then
+				EventInput.release(session)
+				root.AssemblyLinearVelocity, root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+				model:PivotTo(origin.frame)
+			end
+		end
+
 		function Finale.section(object, skipSelf)
 			local parent = skipSelf and object.Parent or object
 			while parent and parent ~= workspace do
@@ -30642,7 +30765,7 @@ do
 
 		function Finale.add(session, object, kind)
 			local zone = workspace:FindFirstChild("FinaleZone")
-			if not object or not zone or not object:IsDescendantOf(zone) then
+			if not object or not zone or not object:IsDescendantOf(zone) or not Finale.physical(object) then
 				return
 			end
 			if object:IsA("BasePart") then
@@ -30812,6 +30935,9 @@ do
 				if session.section and entry.section then
 					allowed = allowed and entry.section == session.section
 				end
+				if session.blocked and session.blocked[object] then
+					allowed = false
+				end
 				if entry.kind == "key" or entry.kind == "lock" then
 					allowed = allowed and Finale.needsKeys(session) and not Finale.reserved[object]
 				end
@@ -30835,8 +30961,40 @@ do
 				end
 			end
 			local _, root = character()
+			local forward
+			for _, entry in ipairs(choices) do
+				if
+					entry.kind == "portal"
+					and entry.section == session.section
+					and (not forward or entry.part.Position.Y > forward.part.Position.Y)
+				then
+					forward = entry
+				end
+			end
+			local climbing = forward and root and forward.part.Position.Y > root.Position.Y + 24
+			if climbing then
+				local filtered = {}
+				for _, entry in ipairs(choices) do
+					local ahead = entry.part.Position - root.Position
+					local goal = forward.part.Position - root.Position
+					if
+						entry.kind ~= "checkpoint"
+						or entry.part.Position.Y >= root.Position.Y - 6 and ahead:Dot(goal) >= -16
+					then
+						table.insert(filtered, entry)
+					end
+				end
+				choices = filtered
+			end
 			table.sort(choices, function(a, b)
-				local priority = { portal = 1, lock = 2, key = 3, prompt = 4, checkpoint = 5, exit = 6 }
+				local priority = {
+					portal = climbing and 5 or 1,
+					lock = 2,
+					key = 3,
+					prompt = 4,
+					checkpoint = climbing and 1 or 5,
+					exit = 6,
+				}
 				if priority[a.kind] ~= priority[b.kind] then
 					return priority[a.kind] < priority[b.kind]
 				end
@@ -30882,12 +31040,36 @@ do
 				ignore = nil
 			end
 			local point = part.Position
+			local portal, origin
 			if kind == "portal" then
-				point = point + part.CFrame.LookVector * 4
+				local objects = session.objects
+				if not objects then
+					objects = hollowModule("OOPTags", generation)
+					session.objects = objects
+				end
+				if not objects or not allowed() then
+					return false
+				end
+				local ok, value = call(object, function()
+					return objects.getObjectAsync("WindowPortal", object)
+				end, 4, generation)
+				if not ok or type(value) ~= "table" or type(value.enter) ~= "function" or not allowed() then
+					return false
+				end
+				portal = value
+				point, origin = Finale.portalStand(session, entry, portal, generation)
+				if not point or not origin then
+					session.retry[object] = os.clock() + 3
+					return false
+				end
 			end
 			local moved =
 				approach(point, generation, ignore, false, allowed, { streamSeconds = 1, settleSeconds = 0.15 })
 			if not moved or not allowed() then
+				return false
+			end
+			if kind == "portal" and root.Position.Y < point.Y + 0.5 then
+				Finale.recover(session, entry, origin, model, root, generation)
 				return false
 			end
 			session.retry[object] = os.clock() + 3
@@ -30899,25 +31081,15 @@ do
 				if typeof(landing) ~= "Vector3" or object:GetAttribute("Enabled") == false then
 					return false
 				end
-				local objects = session.objects
-				if not objects then
-					objects = hollowModule("OOPTags", generation)
-					session.objects = objects
-				end
-				if not objects or not allowed() then
-					return false
-				end
-				local ok, portal = call(object, function()
-					return objects.getObjectAsync("WindowPortal", object)
-				end, 4, generation)
-				if not ok or type(portal) ~= "table" or type(portal.enter) ~= "function" or not allowed() then
-					return false
-				end
 				local remaining = (session.portalAfter or 0) - os.clock()
 				if remaining > 0 and not pause(remaining, generation) then
 					return false
 				end
 				if not allowed() then
+					return false
+				end
+				if root.Position.Y < point.Y + 0.5 then
+					Finale.recover(session, entry, origin, model, root, generation)
 					return false
 				end
 				EventInput.release(session)
@@ -30930,22 +31102,30 @@ do
 				if not entered then
 					return false
 				end
+				local fell, nativeTrip = false, false
 				local arrived = waitUntil(function()
 					local nowModel, nowRoot = character()
 					if nowModel ~= model or not active(generation) then
 						return nil
 					end
+					local busy = session.client.isLocked("CharacterBusyState") or nowRoot and nowRoot.Anchored
+					nativeTrip = nativeTrip or busy
+					if nowRoot and not nativeTrip and nowRoot.Position.Y < point.Y + 0.5 then
+						fell = true
+						Finale.recover(session, entry, origin, model, nowRoot, generation)
+						return true
+					end
 					return nowRoot
 						and (nowRoot.Position - landing).Magnitude < 18
 						and not session.client.isLocked("CharacterBusyState")
 				end, 18, generation)
-				if arrived then
+				if arrived and not fell then
 					session.visited[object], session.section, session.changedAt, session.dirty =
 						true, entry.destination, os.clock(), true
 				else
 					session.retry[object] = os.clock() + 6
 				end
-				return arrived ~= nil
+				return arrived ~= nil and not fell
 			elseif kind == "key" or kind == "lock" then
 				if kind == "lock" and not key then
 					return false
@@ -31000,6 +31180,18 @@ do
 				end, 2, generation)
 				if confirmed then
 					session.visited[object], session.changedAt = true, os.clock()
+					local _, safeRoot, humanoid = character()
+					if safeRoot then
+						local height = safeRoot.Position.Y - math.max(2.6, humanoid.HipHeight + safeRoot.Size.Y / 2)
+						if Finale.floor(safeRoot.Position, entry.section, model, height, 0.8) then
+							session.safe = {
+								frame = model:GetPivot(),
+								point = safeRoot.Position,
+								model = model,
+								section = entry.section,
+							}
+						end
+					end
 				else
 					session.retry[object] = os.clock() + 20
 				end
@@ -31189,6 +31381,7 @@ do
 						if
 							part
 							and zone
+							and Finale.physical(object)
 							and object:IsDescendantOf(zone)
 							and not Finale.reserved[object]
 							and (kind ~= "portal" or object.Name == "SectionPortal" and object:GetAttribute("Enabled") ~= false)
