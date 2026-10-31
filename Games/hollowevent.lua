@@ -3185,15 +3185,23 @@ local function runHollow(generation)
 	if not loaded then
 		return false, "Your Hollow progress is still loading"
 	end
-	local completed = floor == 4 and Bridge.completed()
-		or floor == 5 and Bridge.mirrorsCompleted()
-		or floor == 6 and Bridge.brewCompleted()
-		or floor == 7 and Bridge.lanternsCompleted()
-		or floor == 8 and Bridge.offeringsCompleted()
-		or floor == 9 and Bridge.leversCompleted()
-	if completed and not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true then
-		return true, "Floor " .. floor .. " has already been completed"
+	local function saved()
+		for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+			if tonumber(number) == floor then
+				return true
+			end
+		end
+		return floor == 4 and Bridge.completed()
+			or floor == 5 and Bridge.mirrorsCompleted()
+			or floor == 6 and Bridge.brewCompleted()
+			or floor == 7 and Bridge.lanternsCompleted()
+			or floor == 8 and Bridge.offeringsCompleted()
+			or floor == 9 and Bridge.leversCompleted()
 	end
+	local completed = saved()
+	local revisitOnly = completed
+		and not App.player:GetAttribute("InMaze")
+		and App.player:GetAttribute("HasRelic") ~= true
 	local clientState, reason = hollowModule("ClientState", generation)
 	if not clientState then
 		return false, reason
@@ -3205,6 +3213,61 @@ local function runHollow(generation)
 	local schedule = hollowModule("EventSchedule", generation)
 	if not schedule or not schedule.checkPassed("Chapter" .. tostring(floor)) then
 		return false, "This floor is not open yet"
+	end
+	local function backToLobby()
+		local exit = waitUntil(function()
+			return nearest("%MazeElevatorExit")
+		end, 15, generation)
+		if not exit then
+			return false, active(generation) and "Waiting for the exit elevator to load" or "Stopped"
+		end
+		local returned, why = rideElevator(exit, clientState, objects, generation)
+		if not returned then
+			return false, why
+		end
+		local arrived = waitUntil(function()
+			return not App.player:GetAttribute("InMaze")
+		end, 15, generation)
+		return arrived ~= nil, active(generation) and "Waiting to reach the lobby" or "Stopped"
+	end
+	local function badgeLap()
+		status("Finishing floor " .. floor, "Quick elevator round trip", 0.95)
+		local entrance = waitUntil(function()
+			return nearest("%MazeElevatorEntrance")
+		end, 15, generation)
+		if not entrance then
+			return false, active(generation) and "Waiting for the lobby elevator" or "Stopped"
+		end
+		local entered, why = rideElevator(entrance, clientState, objects, generation, floor)
+		if not entered then
+			return false, why
+		end
+		local sameFloor = waitUntil(function()
+			local currentFloor = App.player:GetAttribute("InMaze")
+			return currentFloor ~= nil
+				and currentFloor ~= false
+				and (type(currentFloor) ~= "number" or currentFloor == floor)
+		end, 15, generation)
+		if not sameFloor then
+			return false, active(generation) and "The elevator hasn't reached floor " .. floor or "Stopped"
+		end
+		status("Back to the lobby", "", 0.98)
+		local returned, reason = backToLobby()
+		if not returned then
+			return false, reason
+		end
+		if
+			not waitUntil(function()
+				return saved() and not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true
+			end, 15, generation)
+		then
+			return false, active(generation) and "Waiting for floor " .. floor .. "'s relic to be saved" or "Stopped"
+		end
+		App.rows.hollow = "Relic returned"
+		return true, "Round trip finished. Check your badge in the game."
+	end
+	if revisitOnly then
+		return badgeLap()
 	end
 	local pillarSession
 	if floor == 2 and App.player:GetAttribute("HasRelic") ~= true then
@@ -3229,7 +3292,7 @@ local function runHollow(generation)
 			return false, why
 		end
 	end
-	if not pause(2, generation) then
+	if App.player:GetAttribute("HasRelic") ~= true and not pause(2, generation) then
 		return false, "Stopped"
 	end
 	if floor == 9 then
@@ -3288,7 +3351,7 @@ local function runHollow(generation)
 				return false, solveError
 			end
 		end
-	else
+	elseif App.player:GetAttribute("HasRelic") ~= true then
 		local puzzle, why = hollowModule("MazeLockPuzzle", generation)
 		if not puzzle then
 			return false, why
@@ -3414,40 +3477,12 @@ local function runHollow(generation)
 	if not relic then
 		return false, "The puzzle opened, but the relic hasn't arrived yet"
 	end
-	status("Relic ready", "Heading back in 10 seconds", 0.88)
-	if not pause(10, generation) then
-		return false, "Stopped"
-	end
 	status("Returning the relic", "", 0.9)
-	local exit = waitUntil(function()
-		return nearest("%MazeElevatorExit")
-	end, 15, generation)
-	if not exit then
-		return false, "Waiting for the exit elevator to load"
-	end
-	local returned, returnError = rideElevator(exit, clientState, objects, generation)
+	local returned, returnError = backToLobby()
 	if not returned then
 		return false, returnError
 	end
-	if
-		(floor >= 4 and floor <= 9)
-		and not waitUntil(function()
-			return (
-				floor == 4 and Bridge.completed()
-				or floor == 5 and Bridge.mirrorsCompleted()
-				or floor == 6 and Bridge.brewCompleted()
-				or floor == 7 and Bridge.lanternsCompleted()
-				or floor == 8 and Bridge.offeringsCompleted()
-				or floor == 9 and Bridge.leversCompleted()
-			)
-				and not App.player:GetAttribute("InMaze")
-				and App.player:GetAttribute("HasRelic") ~= true
-		end, 15, generation)
-	then
-		return false, "Waiting for floor " .. floor .. "'s delivered relic to be saved"
-	end
-	App.rows.hollow = "Relic returned"
-	return true, "Relic delivered. Check your reward in the game."
+	return badgeLap()
 end
 
 local function runKeyboard(generation)
