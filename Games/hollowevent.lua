@@ -4,6 +4,23 @@ local Logic = {}
 
 Logic.games = {
 	{
+		id = "peta",
+		name = "PETAPETA",
+		place = 14451515684,
+		alternatePlaces = { 14476003462 },
+		universe = 4991821731,
+		badges = { 2563508844578846 },
+		objective = "Reach stage 3, watch the evil room's hole and avoid the apparition",
+	},
+	{
+		id = "piggy",
+		name = "Piggy",
+		place = 4623386862,
+		universe = 1516533665,
+		badges = { 747319444753035 },
+		objective = "Enter The Hollow in Piggy and clear the event with helpers",
+	},
+	{
 		id = "killer",
 		name = "Survive the Killer",
 		place = 4580204640,
@@ -34,7 +51,7 @@ Logic.games = {
 		id = "hollow",
 		name = "The Hollow",
 		place = 116463962153167,
-		objective = "Clear floors 1-8 and bring the relic back",
+		objective = "Clear floors 1-9 and bring the relic back",
 	},
 	{
 		id = "shawarma",
@@ -3149,8 +3166,8 @@ local function runHollow(generation)
 		floor = maze
 		App.floor = floor
 	end
-	if floor ~= 1 and floor ~= 2 and floor ~= 3 and floor ~= 4 and floor ~= 5 and floor ~= 6 and floor ~= 7 and floor ~= 8 then
-		return false, "Choose a floor from 1 to 8"
+	if type(floor) ~= "number" or floor % 1 ~= 0 or floor < 1 or floor > 9 then
+		return false, "Choose a floor from 1 to 9"
 	end
 	local loaded = waitUntil(function()
 		return App.player:FindFirstChild("Loaded")
@@ -3163,6 +3180,7 @@ local function runHollow(generation)
 		or floor == 6 and Bridge.brewCompleted()
 		or floor == 7 and Bridge.lanternsCompleted()
 		or floor == 8 and Bridge.offeringsCompleted()
+		or floor == 9 and Bridge.leversCompleted()
 	if completed and not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true then
 		return true, "Floor " .. floor .. " has already been completed"
 	end
@@ -3204,7 +3222,14 @@ local function runHollow(generation)
 	if not pause(2, generation) then
 		return false, "Stopped"
 	end
-	if floor == 8 then
+	if floor == 9 then
+		if not completed and App.player:GetAttribute("HasRelic") ~= true then
+			local solved, solveError = Bridge.solveLevers(objects, clientState, generation)
+			if not solved then
+				return false, solveError
+			end
+		end
+	elseif floor == 8 then
 		if not completed and App.player:GetAttribute("HasRelic") ~= true then
 			local solved, solveError = Bridge.solveOfferings(objects, clientState, generation)
 			if not solved then
@@ -3379,8 +3404,8 @@ local function runHollow(generation)
 	if not relic then
 		return false, "The puzzle opened, but the relic hasn't arrived yet"
 	end
-	status("Relic ready", "Heading back in 3 seconds", 0.88)
-	if not pause(3, generation) then
+	status("Relic ready", "Heading back in 10 seconds", 0.88)
+	if not pause(10, generation) then
 		return false, "Stopped"
 	end
 	status("Returning the relic", "", 0.9)
@@ -3395,7 +3420,7 @@ local function runHollow(generation)
 		return false, returnError
 	end
 	if
-		(floor == 4 or floor == 5 or floor == 6 or floor == 7 or floor == 8)
+		(floor >= 4 and floor <= 9)
 		and not waitUntil(function()
 			return (
 				floor == 4 and Bridge.completed()
@@ -3403,6 +3428,7 @@ local function runHollow(generation)
 				or floor == 6 and Bridge.brewCompleted()
 				or floor == 7 and Bridge.lanternsCompleted()
 				or floor == 8 and Bridge.offeringsCompleted()
+				or floor == 9 and Bridge.leversCompleted()
 			)
 				and not App.player:GetAttribute("InMaze")
 				and App.player:GetAttribute("HasRelic") ~= true
@@ -27688,6 +27714,8 @@ local function start()
 						or current.id == "banana"
 						or current.id == "shawarma"
 						or current.id == "mega"
+						or current.id == "piggy"
+						or current.id == "peta"
 						or character()
 					)
 			end, 25, generation)
@@ -28830,6 +28858,922 @@ do
 	end)()
 end
 
+-- levers + day 9
+do
+	(function()
+		local Day9 = { markers = false, assist = false, lookAway = true, visuals = {} }
+		local piggyTags = {
+			BossCannon = "Cannon",
+			BossPlank = "Plank",
+			BossBot = "Boss bot",
+			TentaclePile = "Tentacle pile",
+			ArenaPlatform = "Platform",
+		}
+
+		function Day9.value(parent, name)
+			local object = parent and parent:FindFirstChild(name)
+			return object and object.Value
+		end
+
+		function Day9.part(object)
+			return App.day8.part(object)
+		end
+
+		-- floor 9
+		function Bridge.leversCompleted()
+			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+				if tonumber(number) == 9 then
+					return true
+				end
+			end
+			return false
+		end
+
+		function Day9.leverState()
+			local puzzle = Day9.levers
+			local state = puzzle and puzzle.getState()
+			return type(state) == "table"
+					and type(state.Walls) == "table"
+					and type(state.Levers) == "table"
+					and type(state.Opened) == "number"
+					and state
+				or nil
+		end
+
+		function Day9.leverItems(state)
+			local items = {}
+			if not state then
+				return items
+			end
+			local expected = state.Walls[state.Opened + 1]
+			for _, object in ipairs(Collection:GetTagged(expected and "%WallLever" or "%LeverWallsRelic")) do
+				local part = Day9.part(object)
+				local key = object:GetAttribute(tostring(App.player.UserId))
+				local symbol = key ~= nil and (state.Levers[tostring(key)] or state.Levers[key])
+				if part and (not expected or symbol == expected) then
+					table.insert(items, {
+						object = object,
+						part = part,
+						key = key,
+						title = expected and "Next lever: " .. tostring(expected) or "Take rune",
+					})
+				end
+			end
+			return items
+		end
+
+		function Bridge.solveLevers(objects, _, generation)
+			local why
+			Day9.levers, why = hollowModule("LeverWallsPuzzle", generation)
+			if not Day9.levers then
+				return false, why
+			end
+			local deadline, retryAt = os.clock() + 300, 0
+			while active(generation) and os.clock() < deadline do
+				if App.player:GetAttribute("HasRelic") == true then
+					return true
+				end
+				if App.player:GetAttribute("InMaze") ~= 9 then
+					return false, "Floor changed"
+				end
+				local state = Day9.leverState()
+				local item = state and App.day8.nearest(Day9.leverItems(state))
+				if state and state.Solved then
+					status("Waiting for the rune", "", 0.84)
+				elseif item and os.clock() >= retryAt then
+					local opened, expected = state.Opened, state.Walls[state.Opened + 1]
+					status(
+						expected and "Pulling the next lever" or "Taking the rune",
+						item.title,
+						0.12 + 0.68 * math.min(opened / math.max(1, #state.Walls), 1)
+					)
+					local kind = expected and "WallLever" or "LeverWallsRelic"
+					local ok, native = call("Floor 9 " .. kind, function()
+						return objects.getObjectAsync(kind, item.object)
+					end, 4, generation)
+					if ok and native and active(generation) then
+						local point = EventInput.point(native.prompt and native.prompt.Parent or item.part)
+						local moved = point and approach(point, generation, native.handle or item.object)
+						local live = Day9.leverState()
+						if moved and live == state and live.Opened == opened and not live.Solved then
+							local valid = not expected or type(native.icon) == "function" and native:icon() == expected
+							if valid then
+								local sent = call("Floor 9 action", function()
+									if expected then
+										Day9.levers.pull(native)
+									else
+										Day9.levers.claim(native)
+									end
+								end, 4, generation)
+								if sent then
+									waitUntil(function()
+										local latest = Day9.leverState()
+										return App.player:GetAttribute("HasRelic") == true
+											or latest ~= state
+											or latest and (latest.Opened ~= opened or latest.Solved)
+									end, 5, generation)
+								end
+							end
+						end
+					end
+					retryAt = os.clock() + 1
+				else
+					status("Waiting for the next lever", "It'll retry when the room loads", 0.12)
+				end
+				if not pause(0.3, generation) then
+					break
+				end
+			end
+			return false, active(generation) and "The lever room hasn't advanced" or "Stopped"
+		end
+
+		-- live objects
+		function Day9.roots()
+			local roots = {}
+			if current.id == "peta" then
+				for _, name in ipairs({ "MapGenerated", "MapCore", "SpawnedItems", "SystemParts" }) do
+					local object = getPath(workspace, "Server", name)
+					if object then
+						table.insert(roots, object)
+					end
+				end
+			elseif current.id == "piggy" then
+				for _, arena in ipairs(Collection:GetTagged("BossArena")) do
+					if arena:IsDescendantOf(workspace) then
+						table.insert(roots, arena)
+					end
+				end
+			end
+			return roots
+		end
+
+		function Day9.resetIndex()
+			Day9.index = { queue = {}, head = 1, objects = {}, nextScan = 0 }
+		end
+
+		function Day9.scan()
+			if not Day9.index then
+				Day9.resetIndex()
+			end
+			local index = Day9.index
+			if index.head > #index.queue then
+				if os.clock() < index.nextScan then
+					return index.objects
+				end
+				index.queue, index.head, index.pending = Day9.roots(), 1, {}
+				index.nextScan = os.clock() + 1.5
+			end
+			local start = os.clock()
+			for _ = 1, 350 do
+				local object = index.queue[index.head]
+				if not object then
+					break
+				end
+				index.head += 1
+				if object:IsDescendantOf(workspace) then
+					if object:IsA("ProximityPrompt") or object.Name == "NozokiAna" or object.Name == "Safe" then
+						table.insert(index.pending, object)
+					end
+					for _, child in ipairs(object:GetChildren()) do
+						table.insert(index.queue, child)
+					end
+				end
+				if os.clock() - start > 0.003 then
+					break
+				end
+			end
+			if index.head > #index.queue then
+				index.objects, index.pending = index.pending, nil
+			end
+			return index.objects
+		end
+
+		function Day9.petaState()
+			local state = Storage:FindFirstChild("GameStatus")
+			return state, tonumber(Day9.value(state, "Stage"))
+		end
+
+		function Day9.petaEntries()
+			local items = {}
+			for _, object in ipairs(Day9.scan()) do
+				if object.Parent and object:IsDescendantOf(workspace) then
+					if object:IsA("ProximityPrompt") and object.Enabled then
+						local holder, title, kind = object.Parent, nil, nil
+						local room = holder and holder.Parent
+						if object.Name == "focus" and room and room:FindFirstChild("kimo") then
+							local hint = getPath(room, "fakeRoom", "doll", "HintPaper", "SurfaceGui")
+							if not hint or not hint.Enabled then
+								title, kind = "Evil room", "hole"
+							end
+						elseif object:GetAttribute("isObtainable") then
+							if holder.Name == "Key" or room and room.Name == "Key" then
+								title, kind = "Key", "key"
+							end
+						elseif object:GetAttribute("isOfudaBox") then
+							title, kind = "Ofuda box", "box"
+						elseif room and room.Name == "Safe" then
+							title, kind = "Safe", "safe"
+						elseif object:GetAttribute("SFX") == "Fusuma" and object.ActionText == "Open" then
+							title, kind = "Door", "door"
+						end
+						local point = title and EventInput.point(holder)
+						local part = point and Day9.part(holder)
+						if part then
+							table.insert(items, {
+								object = object,
+								part = part,
+								point = point,
+								title = title,
+								kind = kind,
+								owner = room,
+							})
+						end
+					end
+				end
+			end
+			return items
+		end
+
+		function Day9.piggyItems()
+			local items = {}
+			for tag, title in pairs(piggyTags) do
+				for _, object in ipairs(Collection:GetTagged(tag)) do
+					local part = Day9.part(object)
+					if part and not object:GetAttribute("BreakAt") then
+						table.insert(items, { object = object, part = part, title = title, threat = tag == "BossBot" })
+					end
+				end
+			end
+			for _, arena in ipairs(Day9.roots()) do
+				local puzzle = arena:FindFirstChild("PreBossPuzzle")
+				if puzzle then
+					for index = 1, 12 do
+						local section = puzzle:FindFirstChild("Section" .. index)
+						if section and App.player:GetAttribute("CrossedSection" .. index) ~= true then
+							local part = Day9.part(section)
+							if part then
+								table.insert(items, { object = section, part = part, title = "Section " .. index })
+							end
+							break
+						end
+					end
+				end
+			end
+			return items
+		end
+
+		function Day9.piggyReady()
+			local at = App.player:GetAttribute("VoidRescueAt")
+			return not App.player:GetAttribute("HalloweenCutscene")
+				and not App.player:GetAttribute("InPortalTransition")
+				and not (type(at) == "number" and workspace:GetServerTimeNow() < at + 2)
+				and App.day8.ready(nil)
+		end
+
+		function Day9.signature(entry)
+			local object = entry.object
+			if not object.Parent then
+				return "gone"
+			end
+			local owner = entry.owner or object.Parent
+			return tostring(object.Enabled)
+				.. ":"
+				.. tostring(owner:GetAttribute("claimed"))
+				.. ":"
+				.. tostring(owner:GetAttribute("shared"))
+				.. ":"
+				.. tostring(owner:GetAttribute("isOpen"))
+		end
+
+		function Day9.hold(session, entry, generation, allowed)
+			local before = Day9.signature(entry)
+			local ok = EventInput.hold(session, entry.object, generation, allowed, {
+				accepted = function()
+					return Day9.signature(entry) ~= before
+				end,
+			})
+			EventInput.release(session)
+			return ok
+		end
+
+		function Day9.nearby(session, generation)
+			if not Day9.piggyReady() then
+				return false
+			end
+			local _, root = character()
+			if not root then
+				return false
+			end
+			local entries = {}
+			for _, prompt in ipairs(Day9.scan()) do
+				if prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Enabled then
+					local point = EventInput.point(prompt.Parent)
+					local part = point and Day9.part(prompt.Parent)
+					if
+						part
+						and (root.Position - point).Magnitude <= math.min(prompt.MaxActivationDistance, 12)
+						and (session.retry[prompt] or 0) < os.clock()
+					then
+						table.insert(entries, { object = prompt, part = part })
+					end
+				end
+			end
+			local entry = App.day8.nearest(entries)
+			if not entry then
+				return false
+			end
+			Day9.hold(session, entry, generation, Day9.piggyReady)
+			session.retry[entry.object] = os.clock() + 2
+			return true
+		end
+
+		-- evil room
+		function Day9.petaUI()
+			return getPath(App.player, "PlayerGui", "GameUI")
+		end
+
+		function Day9.click(object, generation)
+			if not active(generation) or not object or not object:IsA("GuiButton") or not Hospital.visible(object) then
+				return false
+			end
+			if type(firesignal) == "function" then
+				local ok = pcall(firesignal, object.MouseButton1Click)
+				if ok then
+					return true
+				end
+			end
+			return Hospital.guiTap(object, generation, true)
+		end
+
+		function Day9.apparition(ui)
+			local image = ui and ui:FindFirstChild("kimoSUI")
+			local transparency = Day9.value(image, "transp")
+			return image
+					and image.Adornee
+					and (type(transparency) == "number" and transparency <= 0.1 or type(image.Brightness) == "number" and image.Brightness >= 1)
+					and true
+				or false
+		end
+
+		function Day9.avoid(session, generation, force)
+			local ui = Day9.petaUI()
+			local focus = ui and ui:FindFirstChild("NozokiUI")
+			if not focus or not focus.Visible or App.player:GetAttribute("inFocus") ~= true then
+				session.closing = nil
+				Day9.closing = nil
+				return false
+			end
+			if Day9.closing and os.clock() < Day9.closing then
+				return true
+			end
+			if force or Day9.apparition(ui) then
+				if Day9.click(getPath(focus, "Close", "Button"), generation) then
+					Day9.closing = os.clock() + 1
+				end
+			end
+			return true
+		end
+
+		function Day9.petaReady(generation)
+			local state = Day9.petaState()
+			return active(generation)
+				and not App.player:GetAttribute("DEAD")
+				and not App.player:GetAttribute("inFocus")
+				and not App.player:GetAttribute("InCutscene")
+				and not App.player:GetAttribute("teleporting")
+				and state
+				and Day9.value(state, "StageResetting") ~= true
+				and App.day8.ready(generation)
+		end
+
+		function Day9.openDoor(session, point, generation)
+			local _, root = character()
+			if not root then
+				return false
+			end
+			for _, entry in ipairs(Day9.petaEntries()) do
+				if
+					entry.kind == "door"
+					and (root.Position - entry.point).Magnitude <= math.min(8, entry.object.MaxActivationDistance)
+					and (entry.point - point).Magnitude < (root.Position - point).Magnitude
+					and (session.retry[entry.object] or 0) < os.clock()
+				then
+					Day9.hold(session, entry, generation, function()
+						return Day9.petaReady(generation)
+					end)
+					session.retry[entry.object] = os.clock() + 3
+					return true
+				end
+			end
+			return false
+		end
+
+		function Day9.walk(session, point, generation, valid)
+			local model, root, humanoid = character()
+			if not root or not Day9.petaReady(generation) then
+				return false
+			end
+			if (root.Position - point).Magnitude < 3 then
+				return true
+			end
+			local ok, waypoints = call("PETAPETA route", function()
+				local path = game:GetService("PathfindingService")
+					:CreatePath({ AgentRadius = 1.5, AgentHeight = 5, AgentCanJump = true })
+				path:ComputeAsync(root.Position, point)
+				return path.Status == Enum.PathStatus.Success and path:GetWaypoints() or nil
+			end, 4, generation)
+			if not ok or not waypoints then
+				Day9.openDoor(session, point, generation)
+				return false
+			end
+			local deadline = os.clock() + 45
+			for _, waypoint in ipairs(waypoints) do
+				if not Day9.petaReady(generation) or valid and not valid() or App.player.Character ~= model then
+					return false
+				end
+				if waypoint.Action == Enum.PathWaypointAction.Jump then
+					humanoid.Jump = true
+				end
+				humanoid:MoveTo(waypoint.Position)
+				session.walking = humanoid
+				local last, stalled = root.Position, os.clock() + 2
+				while
+					Vector3.new(root.Position.X - waypoint.Position.X, 0, root.Position.Z - waypoint.Position.Z).Magnitude
+						> 2.5
+					or math.abs(root.Position.Y - waypoint.Position.Y) > 6
+				do
+					if
+						not Day9.petaReady(generation)
+						or App.player.Character ~= model
+						or valid and not valid()
+						or os.clock() > deadline
+						or os.clock() > stalled
+					then
+						humanoid:MoveTo(root.Position)
+						session.walking = nil
+						if Day9.petaReady(generation) then
+							Day9.openDoor(session, point, generation)
+						end
+						return false
+					end
+					if (root.Position - last).Magnitude > 0.5 then
+						last, stalled = root.Position, os.clock() + 2
+					end
+					if not pause(0.08, generation) then
+						return false
+					end
+				end
+			end
+			session.walking = nil
+			return true
+		end
+
+		function Day9.safe(session, generation)
+			local ui = Day9.petaUI()
+			local panel, lockUI = ui and ui:FindFirstChild("SafeUI"), ui and ui:FindFirstChild("SafeLockUI")
+			if not panel or not panel.Visible or not lockUI or not lockUI.Enabled or not session.safe then
+				return false
+			end
+			local safe = session.safe
+			if lockUI.Adornee ~= safe:FindFirstChild("UIPart") then
+				return false
+			end
+			local function owned()
+				return active(generation)
+					and safe.Parent
+					and panel.Visible
+					and lockUI.Enabled
+					and App.player:GetAttribute("inFocus") == true
+					and not App.player:GetAttribute("DEAD")
+			end
+			if not session.feedbackConnection then
+				local remote = Storage:FindFirstChild("MemoTextColorUpdateEvent")
+				if not remote or not remote:IsA("RemoteEvent") then
+					return true
+				end
+				session.feedbackConnection = remote.OnClientEvent:Connect(function(kind, matches)
+					if kind == "FindCode" and owned() and type(matches) == "string" then
+						session.matches, session.feedbackVersion = matches, (session.feedbackVersion or 0) + 1
+					end
+				end)
+			end
+			status("Opening the safe", "Turning the dials", 0.3)
+			for index = 1, 3 do
+				local solved = false
+				for _ = 1, 12 do
+					if not owned() then
+						break
+					end
+					local version = session.feedbackVersion or 0
+					if not Day9.click(getPath(lockUI, "Circle" .. index, "Left"), generation) then
+						break
+					end
+					local response = waitUntil(function()
+						return (session.feedbackVersion or 0) > version
+					end, 2, generation)
+					if not response then
+						break
+					end
+					if (session.matches or ""):find(tostring(index), 1, true) then
+						solved = true
+						break
+					end
+					if not pause(0.18, generation) then
+						break
+					end
+				end
+				if not solved then
+					break
+				end
+			end
+			if owned() and session.matches == "123" then
+				local prompt = getPath(safe, "HandleInteractPoint", "handle")
+				if prompt then
+					EventInput.hold(session, prompt, generation, owned, {
+						customCamera = true,
+						accepted = function()
+							return Day9.value(safe, "Unlocked") == true
+						end,
+					})
+				end
+				waitUntil(function()
+					return Day9.value(safe, "Unlocked") == true or not owned()
+				end, 3, generation)
+			end
+			if owned() then
+				Day9.click(getPath(panel, "Close", "Button"), generation)
+			end
+			if session.feedbackConnection then
+				session.feedbackConnection:Disconnect()
+				session.feedbackConnection = nil
+			end
+			session.matches, session.safe = nil, nil
+			EventInput.release(session)
+			return true
+		end
+
+		function Day9.ofuda(session, generation)
+			local state = Day9.petaState()
+			if not state or Day9.value(state, "OfudaPlaced") or App.player:GetAttribute("isInRoom") ~= false then
+				return false
+			end
+			local model, root, humanoid = character()
+			local tool = model and model:FindFirstChildWhichIsA("Tool")
+			if not tool or not tool:GetAttribute("Ofuda") then
+				for _, child in ipairs((App.player:FindFirstChild("Backpack") or App.player):GetChildren()) do
+					if child:IsA("Tool") and child:GetAttribute("Ofuda") then
+						tool = child
+						break
+					end
+				end
+			end
+			if not tool or not tool:GetAttribute("Ofuda") then
+				return false
+			end
+			local camera = workspace.CurrentCamera
+			if not camera or not Day9.petaReady(generation) then
+				return false
+			end
+			humanoid:EquipTool(tool)
+			local previous = camera.CFrame
+			local aim = CFrame.lookAt(camera.CFrame.Position, root.Position - Vector3.new(0, 3, 0))
+			session.look = {
+				camera = camera,
+				kind = camera.CameraType,
+				previous = previous,
+				aim = aim,
+				cameraEpoch = App.cameraEpoch,
+			}
+			camera.CFrame = aim
+			if pause(0.3, generation) and Day9.petaReady(generation) then
+				tool:Activate()
+			end
+			pause(0.5, generation)
+			EventInput.release(session)
+			return true
+		end
+
+		function Day9.release(session)
+			EventInput.release(session)
+			if session.walking then
+				local _, root = character()
+				if root then
+					pcall(session.walking.MoveTo, session.walking, root.Position)
+				end
+				session.walking = nil
+			end
+			if session.guideConnection then
+				session.guideConnection:Disconnect()
+				session.guideConnection = nil
+			end
+			if session.feedbackConnection then
+				session.feedbackConnection:Disconnect()
+				session.feedbackConnection = nil
+			end
+			if session.safe then
+				local ui = Day9.petaUI()
+				local lockUI = ui and ui:FindFirstChild("SafeLockUI")
+				if lockUI and lockUI.Adornee == session.safe:FindFirstChild("UIPart") then
+					Day9.click(getPath(ui, "SafeUI", "Close", "Button"), nil)
+				end
+				session.safe = nil
+			end
+			if session.ownedFocus then
+				Day9.avoid(session, nil, true)
+				session.ownedFocus = nil
+			end
+		end
+
+		function Day9.runPeta(generation)
+			local session = { retry = {} }
+			table.insert(App.cleanups, function()
+				Day9.release(session)
+			end)
+			local checked, lastBadge, guideRemote = nil, -10, nil
+			while active(generation) do
+				local state, stage = Day9.petaState()
+				local ui = Day9.petaUI()
+				if os.clock() - lastBadge >= 8 and App.player:GetAttribute("inFocus") ~= true then
+					lastBadge = os.clock()
+					checked = verify(current, generation)
+					if checked == true then
+						return true, "PETAPETA badge earned"
+					end
+				end
+				local remote = Storage:FindFirstChild("Stage1GuideEvent")
+				if remote and remote ~= guideRemote and remote:IsA("RemoteEvent") then
+					if session.guideConnection then
+						session.guideConnection:Disconnect()
+					end
+					guideRemote = remote
+					session.guideConnection = remote.OnClientEvent:Connect(function(kind, point)
+						if kind == "ShowArrow" and typeof(point) == "Vector3" then
+							session.guide = point
+						elseif kind == "HideArrow" then
+							session.guide = nil
+						end
+					end)
+				end
+				if session.stage ~= stage then
+					session.stage, session.retry, session.guide = stage, {}, nil
+					Day9.resetIndex()
+				end
+				if stage == 1 and not session.guide then
+					for index = 20, 1, -1 do
+						local arrow = workspace:FindFirstChild("Stage1PathArrow_" .. index .. "_" .. App.player.UserId)
+						local part = arrow and Day9.part(arrow)
+						if part then
+							session.arrow = part
+							break
+						end
+					end
+				end
+				if Day9.safe(session, generation) then
+				elseif Day9.avoid(session, generation, false) then
+					status("Watching the hole", "Waiting for the apparition", 0.85)
+				elseif Day9.petaReady(generation) then
+					local entries, choices = Day9.petaEntries(), {}
+					for _, entry in ipairs(entries) do
+						local wanted = stage == 3 and entry.kind == "hole"
+							or (stage == 1 or stage == 2)
+								and (entry.kind == "key" and Day9.value(state, "KeyObtained") ~= true or entry.kind == "box" and Day9.value(
+									state,
+									"KeyObtained"
+								) == true and Day9.value(state, "BoxOpened") ~= true or stage == 2 and entry.kind == "safe" and Day9.value(
+									state,
+									"KeyObtained"
+								) ~= true and entry.object.Name == "focus")
+						if (session.retry[entry.object] or 0) <= os.clock() and wanted then
+							table.insert(choices, entry)
+						end
+					end
+					local entry = App.day8.nearest(choices)
+					if entry then
+						status(
+							"Heading to " .. entry.title:lower(),
+							"Stage " .. tostring(stage),
+							stage == 3 and 0.7 or 0.15
+						)
+						local valid = function()
+							return entry.object.Parent and entry.object.Enabled and select(2, Day9.petaState()) == stage
+						end
+						if Day9.walk(session, entry.point, generation, valid) and valid() then
+							if entry.kind == "hole" then
+								session.ownedFocus = true
+							end
+							if entry.kind == "safe" then
+								session.safe = entry.owner
+							end
+							Day9.hold(session, entry, generation, function()
+								return Day9.petaReady(generation)
+							end)
+						end
+						session.retry[entry.object] = os.clock() + (entry.kind == "box" and 6 or 3)
+					elseif (stage == 1 or stage == 2) and Day9.ofuda(session, generation) then
+						status("Placing the hallway Ofuda", "", 0.3)
+					elseif stage == 1 and (session.guide or session.arrow and session.arrow.Parent) then
+						local point = session.guide or session.arrow.Position
+						Day9.walk(session, point, generation, function()
+							return select(2, Day9.petaState()) == stage
+						end)
+					else
+						status(
+							"PETAPETA",
+							stage == 3 and "Looking for the evil room"
+								or stage == 2 and "Looking for the key and safe"
+								or "Follow the story to stage 3. Keys, boxes and the evil room have assist.",
+							0.1
+						)
+					end
+				else
+					status(
+						"Waiting for PETAPETA",
+						App.player:GetAttribute("DEAD") and "Join the next run to continue" or "Waiting for the stage",
+						0.1
+					)
+				end
+				if not pause(0.08, generation) then
+					break
+				end
+			end
+			return false, "Stopped"
+		end
+
+		-- piggy
+		function Day9.piggyStatus()
+			local arena = Day9.roots()[1]
+			if not arena then
+				return "Enter The Hollow from Piggy's menu. Helpers will pick it up here."
+			end
+			local phase = arena:GetAttribute("State")
+			if phase == "Vortex" then
+				return "Vortex active. Stay clear of the middle."
+			end
+			if phase == "Done" then
+				return "Finish the portal sequence to claim the badge"
+			end
+			if phase == "Charge" or phase == "Fire" then
+				return "Boss attack. Use the platforms for cover."
+			end
+			return "Follow the section markers. Planks and cannons are marked too."
+		end
+
+		function Day9.runPiggy(generation)
+			local session, lastBadge = { retry = {} }, -10
+			table.insert(App.cleanups, function()
+				Day9.release(session)
+			end)
+			if not Day9.markers then
+				Day9.toggleMarkers()
+			end
+			while active(generation) do
+				if os.clock() - lastBadge >= 8 then
+					lastBadge = os.clock()
+					if verify(current, generation) == true then
+						return true, "Piggy badge earned"
+					end
+				end
+				status("Piggy helpers", Day9.piggyStatus(), 0)
+				if Day9.roots()[1] then
+					Day9.nearby(session, generation)
+				end
+				if not pause(0.2, generation) then
+					break
+				end
+			end
+			return false, "Stopped"
+		end
+
+		-- markers
+		function Day9.items()
+			if current.id == "piggy" then
+				return Day9.piggyItems()
+			end
+			if current.id == "peta" then
+				return Day9.petaEntries()
+			end
+			return Day9.leverItems(Day9.leverState())
+		end
+
+		function Day9.clearMarkers()
+			Day9.markers = false
+			for _, visual in pairs(Day9.visuals) do
+				visual.highlight:Destroy()
+				visual.billboard:Destroy()
+			end
+			Day9.visuals = {}
+		end
+
+		function Day9.draw()
+			local keep, entries = {}, Day9.items()
+			local _, root = character()
+			if root then
+				table.sort(entries, function(a, b)
+					return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+				end)
+			end
+			for index, entry in ipairs(entries) do
+				if index > 24 then
+					break
+				end
+				local visual = Day9.visuals[entry.object]
+				if not visual then
+					local highlight = Instance.new("Highlight")
+					highlight.Adornee = entry.part
+					highlight.FillTransparency, highlight.DepthMode = 0.85, Enum.HighlightDepthMode.AlwaysOnTop
+					highlight.OutlineColor = entry.threat and colors.coral or colors.mint
+					highlight.Parent = App.gui
+					local billboard = Instance.new("BillboardGui")
+					billboard.Size, billboard.StudsOffset, billboard.AlwaysOnTop =
+						UDim2.fromOffset(180, 42), Vector3.new(0, 3, 0), true
+					billboard.Adornee, billboard.Parent = entry.part, App.gui
+					local text =
+						label(billboard, "", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), 13, highlight.OutlineColor)
+					text.TextStrokeTransparency = 0.2
+					visual = { highlight = highlight, billboard = billboard, text = text }
+					Day9.visuals[entry.object] = visual
+				end
+				visual.text.Text = entry.title
+					.. (root and "\n" .. math.floor((entry.part.Position - root.Position).Magnitude) .. " studs" or "")
+				keep[entry.object] = true
+			end
+			for object, visual in pairs(Day9.visuals) do
+				if not keep[object] then
+					visual.highlight:Destroy()
+					visual.billboard:Destroy()
+					Day9.visuals[object] = nil
+				end
+			end
+		end
+
+		function Day9.watch()
+			if Day9.watching then
+				return
+			end
+			Day9.watching = true
+			Day9.epoch = (Day9.epoch or 0) + 1
+			local epoch, session, nextDraw = Day9.epoch, { retry = {} }, 0
+			Day9.helperSession = session
+			task.spawn(function()
+				while
+					App.alive
+					and Day9.epoch == epoch
+					and (Day9.markers or Day9.assist or current.id == "peta" and Day9.lookAway)
+				do
+					local ok = pcall(function()
+						if Day9.markers and os.clock() >= nextDraw then
+							Day9.draw()
+							nextDraw = os.clock() + 0.4
+						end
+						if current.id == "peta" and Day9.lookAway then
+							Day9.avoid(session, nil, false)
+						elseif not App.running and current.id == "piggy" and Day9.assist then
+							Day9.nearby(session)
+						end
+					end)
+					if not ok then
+						EventInput.release(session)
+					end
+					task.wait(0.08)
+				end
+				Day9.release(session)
+				if Day9.epoch == epoch then
+					Day9.watching, Day9.helperSession = false, nil
+				end
+			end)
+		end
+
+		function Day9.toggleMarkers()
+			if Day9.markers then
+				Day9.clearMarkers()
+			else
+				Day9.markers = true
+				if current.id == "hollow" then
+					task.spawn(function()
+						Day9.levers = hollowModule("LeverWallsPuzzle")
+					end)
+				end
+				Day9.watch()
+			end
+			refresh()
+		end
+
+		function Day9.clear()
+			Day9.assist, Day9.lookAway = false, false
+			Day9.epoch, Day9.watching = (Day9.epoch or 0) + 1, false
+			Day9.clearMarkers()
+			if Day9.helperSession then
+				Day9.release(Day9.helperSession)
+				Day9.helperSession = nil
+			end
+			Day9.index = nil
+		end
+
+		App.day9 = Day9
+		runners.peta, runners.piggy = Day9.runPeta, Day9.runPiggy
+	end)()
+end
+
 -- menu
 local function buildUI(parent)
 	local gui = new("ScreenGui", parent, {
@@ -29194,6 +30138,27 @@ local function buildUI(parent)
 			label(event, "Markers and skill assist also work without Start", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 32), 12, colors.muted)
 		end
 	end
+	if current and (current.id == "hollow" or current.id == "peta" or current.id == "piggy") then
+		ui.day9Markers = button(event, current.id == "hollow" and "Floor 9 markers: OFF" or "Event markers: OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+			App.day9.toggleMarkers()
+		end)
+		if current.id == "peta" then
+			ui.day9Avoid = button(event, "Look-away assist: ON", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				App.day9.lookAway = not App.day9.lookAway
+				App.day9.watch()
+				refresh()
+			end)
+			label(event, "Start handles keys, boxes, the safe and stage 3's hole. Follow the story if it needs a hand.", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 54), 12, colors.muted)
+			App.day9.watch()
+		elseif current.id == "piggy" then
+			ui.day9Assist = button(event, "Nearby prompt assist: OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+				App.day9.assist = not App.day9.assist
+				App.day9.watch()
+				refresh()
+			end)
+			label(event, "Enter The Hollow in Piggy first. Markers and prompt assist help with the event. Boss puzzles are manual.", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 60), 12, colors.muted)
+		end
+	end
 	if current and current.id == "hollow" then
 		local floors =
 			new("Frame", event, { Name = "FloorSelector", Size = UDim2.new(1, -8, 0, 44), BackgroundTransparency = 1 })
@@ -29208,7 +30173,7 @@ local function buildUI(parent)
 		end)
 		button(floors, ">", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(44, 44), function()
 			if not App.running then
-				App.floor = math.min(8, App.floor + 1)
+				App.floor = math.min(9, App.floor + 1)
 				refresh()
 			end
 		end)
@@ -29401,7 +30366,7 @@ local function buildUI(parent)
 			ui.start,
 			"Text",
 			current
-					and (current.id == "mvsd" or current.id == "rails")
+					and (current.id == "mvsd" or current.id == "rails" or current.id == "piggy")
 					and (App.running and "Helpers on" or "Enable helpers")
 				or current and current.manual and "Manual only"
 				or (App.running and "Running" or (App.traveling and "Traveling" or "Start"))
@@ -29431,6 +30396,14 @@ local function buildUI(parent)
 			day8Skills = App.day8 and App.day8.helpers == true, day8Aim = App.day8 and App.day8.bossAim == true}) do
 			if ui[key] then
 				local title = key == "day8Markers" and "Event markers" or key == "day8Skills" and "Skill check assist" or "Boss aim"
+				setProperty(ui[key], "Text", title .. (enabled and ": ON" or ": OFF"))
+				setProperty(ui[key], "BackgroundColor3", enabled and colors.mint or colors.raised)
+				setProperty(ui[key], "TextColor3", enabled and colors.base or colors.text)
+			end
+		end
+		for key, title in pairs({ day9Markers = current and current.id == "hollow" and "Floor 9 markers" or "Event markers", day9Avoid = "Look-away assist", day9Assist = "Nearby prompt assist" }) do
+			if ui[key] then
+				local enabled = App.day9 and (key == "day9Markers" and App.day9.markers or key == "day9Avoid" and App.day9.lookAway or key == "day9Assist" and App.day9.assist) == true
 				setProperty(ui[key], "Text", title .. (enabled and ": ON" or ": OFF"))
 				setProperty(ui[key], "BackgroundColor3", enabled and colors.mint or colors.raised)
 				setProperty(ui[key], "TextColor3", enabled and colors.base or colors.text)
@@ -29745,6 +30718,9 @@ App.unload = function()
 	App.unloading = true
 	App.generation += 1
 	App.running = false
+	if App.day9 then
+		pcall(App.day9.clear)
+	end
 	if App.day8 then
 		pcall(App.day8.clear)
 	end
