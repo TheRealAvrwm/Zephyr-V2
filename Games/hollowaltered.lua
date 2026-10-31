@@ -1048,6 +1048,13 @@ end
 if type(env.__HOLLOW_INFECTION_AIM) == "table" and env.__HOLLOW_INFECTION_AIM.version ~= 3 then
 	env.__HOLLOW_INFECTION_AIM.dispatch = nil
 end
+do
+	local previous = env.__HOLLOW_PANEL
+	local pending = type(previous) == "table" and type(previous.personal) == "table" and previous.personal.pending
+	if pending and previous.player then
+		env.__HOLLOW_PERSONAL_RESUME = { userId = previous.player.UserId, floor = pending.floor, phase = pending.phase }
+	end
+end
 if type(env.__HOLLOW_PANEL) == "table" and type(env.__HOLLOW_PANEL.unload) == "function" then
 	pcall(env.__HOLLOW_PANEL.unload)
 end
@@ -32190,6 +32197,8 @@ do
 	(function()
 		local Personal = { done = {}, manual = false, links = {}, speed = 50 }
 		local original, originalStop = runners.hollow, stop
+		local resume = env.__HOLLOW_PERSONAL_RESUME
+		env.__HOLLOW_PERSONAL_RESUME = nil
 
 		-- floor progress
 		function Personal.saved(floor)
@@ -32260,13 +32269,13 @@ do
 						return false, why
 					end
 				end
-				status("Returning floor " .. floor .. "'s relic", "Waiting for it to save", 0.9)
+				status("Back to the lobby", "", 0.9)
 				if
 					not waitUntil(function()
-						return Personal.returned(floor)
-					end, 45, generation)
+						return not App.player:GetAttribute("InMaze")
+					end, 15, generation)
 				then
-					return false, active(generation) and "The relic hasn't been returned yet" or "Stopped"
+					return false, active(generation) and "Waiting to reach the lobby" or "Stopped"
 				end
 				pending.phase = "enter"
 			end
@@ -32300,7 +32309,9 @@ do
 						return Personal.returned(floor)
 					end, 15, generation)
 				then
-					return false, active(generation) and "Waiting for the lobby return" or "Stopped"
+					return false,
+						active(generation) and "Waiting for floor " .. floor .. "'s credit after the round trip"
+							or "Stopped"
 				end
 			end
 			Personal.done[floor], Personal.pending = true, nil
@@ -32476,27 +32487,40 @@ do
 			then
 				return false, active(generation) and "Your floor progress is still loading" or "Stopped"
 			end
+			if resume then
+				if
+					resume.userId == App.player.UserId
+					and type(resume.floor) == "number"
+					and resume.floor >= 1
+					and resume.floor <= 9
+					and resume.floor % 1 == 0
+					and (resume.phase == "return" or resume.phase == "enter" or resume.phase == "exit")
+				then
+					Personal.pending = { floor = resume.floor, phase = resume.phase }
+				end
+				resume = nil
+			end
 			if
 				not App.player:GetAttribute("InMaze")
 				and App.player:GetAttribute("HasRelic") == true
 				and not Personal.pending
 			then
-				status("Returning the relic", "Waiting for it to save", 0)
-				if
-					not waitUntil(function()
-						return not App.player:GetAttribute("InMaze") and App.player:GetAttribute("HasRelic") ~= true
-					end, 45, generation)
-				then
-					return false, active(generation) and "The relic hasn't been returned yet" or "Stopped"
+				if not Personal.chooseReturn then
+					Personal.chooseReturn = true
+					return false, "Pick the floor you just cleared, then press Start"
 				end
+				Personal.pending = { floor = App.floor, phase = "enter" }
+				Personal.chooseReturn = nil
 			end
 			local inside = App.player:GetAttribute("InMaze")
 			local order = {}
-			if type(inside) == "number" and inside >= 1 and inside <= 9 then
+			if Personal.pending then
+				table.insert(order, Personal.pending.floor)
+			elseif type(inside) == "number" and inside >= 1 and inside <= 9 then
 				table.insert(order, inside)
 			end
 			for floor = 1, 9 do
-				if floor ~= inside then
+				if floor ~= order[1] then
 					table.insert(order, floor)
 				end
 			end
