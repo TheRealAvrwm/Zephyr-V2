@@ -51,7 +51,7 @@ Logic.games = {
 		id = "hollow",
 		name = "The Hollow",
 		place = 116463962153167,
-		objective = "Clear floors 1-9 and bring the relic back",
+		objective = "Clear floors 1-9 or choose floor 10 for the finale",
 	},
 	{
 		id = "shawarma",
@@ -1500,8 +1500,10 @@ local function rideElevator(part, clientState, objects, generation, floor)
 		end
 		local maze = App.player:GetAttribute("InMaze")
 		local inMaze = maze ~= nil and maze ~= false
-		return floor and inMaze and (type(maze) ~= "number" or maze == floor) or (not floor and not inMaze)
-	end, 30, generation)
+		return floor == 10 and App.player:GetAttribute("InFinale") == true
+			or floor and inMaze and (type(maze) ~= "number" or maze == floor)
+			or (not floor and not inMaze)
+	end, floor == 10 and 150 or 30, generation)
 	if not arrived then
 		local ownsRide = env.__HOLLOW_PANEL == App
 			and (active(generation) or (App.generation == generation + 1 and not App.running))
@@ -1509,6 +1511,9 @@ local function rideElevator(part, clientState, objects, generation, floor)
 			clientState.setState("ElevatorSelection", -1)
 		end
 		return false, floor and "The elevator didn't start" or "The exit didn't open"
+	end
+	if floor == 10 then
+		return true
 	end
 	local ready = waitUntil(function()
 		return not clientState.isLocked("CharacterBusyState")
@@ -3162,12 +3167,17 @@ end
 local function runHollow(generation)
 	local floor = App.floor
 	local maze = App.player:GetAttribute("InMaze")
-	if type(maze) == "number" then
+	if App.player:GetAttribute("InFinale") == true then
+		floor, App.floor = 10, 10
+	elseif type(maze) == "number" then
 		floor = maze
 		App.floor = floor
 	end
-	if type(floor) ~= "number" or floor % 1 ~= 0 or floor < 1 or floor > 9 then
-		return false, "Choose a floor from 1 to 9"
+	if floor == 10 then
+		return App.finale.run(generation)
+	end
+	if type(floor) ~= "number" or floor % 1 ~= 0 or floor < 1 or floor > 10 then
+		return false, "Choose a floor from 1 to 10"
 	end
 	local loaded = waitUntil(function()
 		return App.player:FindFirstChild("Loaded")
@@ -30511,6 +30521,569 @@ do
 end
 
 
+-- finale
+do
+	(function()
+		local Finale = { markers = false, visuals = {} }
+		local tags = {
+			["%KeyGiver"] = "key",
+			["%GateLock"] = "lock",
+			["%Gate"] = "gate",
+			["%ObbyCheckpoint"] = "checkpoint",
+			["%FinalExitPortal"] = "exit",
+		}
+
+		function Finale.completed()
+			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
+				if tonumber(number) == 10 then
+					return true
+				end
+			end
+			return false
+		end
+
+		function Finale.key(index)
+			if type(index) ~= "number" or index % 1 ~= 0 then
+				return nil
+			end
+			local name = "Key" .. index
+			local backpack, model = App.player:FindFirstChild("Backpack"), App.player.Character
+			return backpack and backpack:FindFirstChild(name) or model and model:FindFirstChild(name)
+		end
+
+		function Finale.group(object)
+			local parent = object
+			while parent and parent ~= workspace do
+				local number = parent.Name:match("^LockKeySet(%d+)$")
+				if number then
+					return tonumber(number)
+				end
+				parent = parent.Parent
+			end
+		end
+
+		function Finale.add(session, object, kind)
+			if not object or not object:IsDescendantOf(workspace) then
+				return
+			end
+			if object:IsA("BasePart") then
+				kind = kind
+					or (object:FindFirstChild("GrabRemote") and "key")
+					or (object:FindFirstChild("InsertRemote") and "lock")
+			elseif object:IsA("ProximityPrompt") then
+				kind = "prompt"
+			elseif object:IsA("RemoteFunction") and object.Parent then
+				if object.Name == "GrabRemote" or object.Name == "InsertRemote" then
+					Finale.add(session, object.Parent, object.Name == "GrabRemote" and "key" or "lock")
+				end
+			end
+			if kind then
+				local part = App.day8.part(object:IsA("ProximityPrompt") and object.Parent or object)
+				if part then
+					session.items[object] = { object = object, part = part, kind = kind }
+				end
+			end
+		end
+
+		function Finale.index(session)
+			local zone = workspace:FindFirstChild("FinaleZone")
+			if zone ~= session.zone then
+				if session.zoneAdded then
+					session.zoneAdded:Disconnect()
+				end
+				session.zone, session.queue, session.head = zone, zone and { zone } or {}, 1
+				if zone then
+					session.zoneAdded = zone.DescendantAdded:Connect(function(object)
+						Finale.add(session, object)
+					end)
+				end
+			end
+			for tag, kind in pairs(tags) do
+				for _, object in ipairs(Collection:GetTagged(tag)) do
+					Finale.add(session, object, kind)
+				end
+			end
+			local queue = session.queue or {}
+			for _ = 1, 250 do
+				local object = queue[session.head or 1]
+				if not object then
+					break
+				end
+				session.head = (session.head or 1) + 1
+				if object.Parent then
+					Finale.add(session, object)
+					for _, child in ipairs(object:GetChildren()) do
+						table.insert(queue, child)
+					end
+				end
+			end
+			if (session.head or 1) > #queue then
+				session.queue, session.head = {}, 1
+			end
+			for object, entry in pairs(session.items) do
+				if not object:IsDescendantOf(workspace) or not entry.part:IsDescendantOf(workspace) then
+					session.items[object], session.visited[object], session.retry[object] = nil, nil, nil
+				end
+			end
+		end
+
+		function Finale.bind(session, name, callback)
+			local remote = getPath(Storage, "Remotes", name)
+			if remote and remote:IsA("RemoteEvent") and session.bound[name] ~= remote then
+				if session.listeners[name] then
+					session.listeners[name]:Disconnect()
+				end
+				session.bound[name] = remote
+				session.listeners[name] = remote.OnClientEvent:Connect(callback)
+			end
+		end
+
+		function Finale.objective(session, generation)
+			Finale.bind(session, "FinaleObjectiveCompleted", function()
+				session.dirty = true
+			end)
+			Finale.bind(session, "CheckpointReached", function()
+				session.checkpoints += 1
+				session.changedAt, session.dirty = os.clock(), true
+			end)
+			Finale.bind(session, "FinalExitPlay", function()
+				session.exiting, session.changedAt = true, os.clock()
+			end)
+			if os.clock() < (session.pollAt or 0) then
+				return
+			end
+			session.pollAt = os.clock() + (session.dirty and 0.5 or 1.5)
+			session.dirty = false
+			local remote = getPath(Storage, "Remotes", "FinaleObjective")
+			if not remote or not remote:IsA("RemoteFunction") then
+				return
+			end
+			local ok, packet = call(remote, function()
+				return remote:InvokeServer()
+			end, 3, generation)
+			if ok and type(packet) == "table" and type(packet.text) == "string" then
+				local key = tostring(packet.index) .. ":" .. packet.text
+				if key ~= session.objectiveKey then
+					session.objectiveKey, session.changedAt = key, os.clock()
+					for object, entry in pairs(session.items) do
+						if entry.kind == "prompt" then
+							session.visited[object] = nil
+						end
+					end
+				end
+				session.objective = packet
+			end
+		end
+
+		function Finale.ready(session, generation)
+			local model, root, humanoid = character()
+			return active(generation)
+				and App.player:GetAttribute("InFinale") == true
+				and not session.exiting
+				and model
+				and root
+				and humanoid.Health > 0
+				and not root.Anchored
+				and not session.client.isLocked("Cutscene")
+				and not session.client.isLocked("CharacterBusyState")
+		end
+
+		function Finale.gate(session)
+			local chosen
+			for _, entry in pairs(session.items) do
+				if entry.kind == "gate" and entry.part.CanCollide then
+					if not chosen or entry.part.Position.X < chosen.part.Position.X then
+						chosen = entry
+					end
+				end
+			end
+			return chosen
+		end
+
+		function Finale.entries(session)
+			local choices, gate = {}, Finale.gate(session)
+			local group = gate and (Finale.group(gate.object) or tonumber(gate.object:GetAttribute("Id")))
+			for object, entry in pairs(session.items) do
+				local index = tonumber(object:GetAttribute("Index"))
+				local wanted = entry.kind == "key" and not Finale.key(index) and not session.visited[object]
+					or entry.kind == "lock" and Finale.key(index) and not session.visited[object]
+					or entry.kind == "checkpoint" and not session.visited[object]
+					or entry.kind == "exit" and not gate
+					or entry.kind == "prompt" and object.Enabled and not session.visited[object]
+				local ownGroup = Finale.group(object)
+				local allowed = not gate or entry.part.Position.X <= gate.part.Position.X + 8
+				if ownGroup and group then
+					allowed = ownGroup == group
+				end
+				if entry.kind == "prompt" then
+					local text = (object.ActionText .. " " .. object.ObjectText):lower()
+					allowed = allowed
+						and not text:find("buy", 1, true)
+						and not text:find("purchase", 1, true)
+						and not text:find("subscribe", 1, true)
+						and not text:find("key", 1, true)
+						and not text:find("ugc", 1, true)
+				end
+				if wanted and allowed and os.clock() >= (session.retry[object] or 0) then
+					table.insert(choices, entry)
+				end
+			end
+			local _, root = character()
+			table.sort(choices, function(a, b)
+				local priority = { lock = 1, key = 2, prompt = 3, checkpoint = 4, exit = 5 }
+				if priority[a.kind] ~= priority[b.kind] then
+					return priority[a.kind] < priority[b.kind]
+				end
+				if a.kind == "checkpoint" then
+					local ai, bi = tonumber(a.object:GetAttribute("Index")), tonumber(b.object:GetAttribute("Index"))
+					if ai and bi and ai ~= bi then
+						return ai < bi
+					end
+				end
+				return root
+						and (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+					or false
+			end)
+			return choices
+		end
+
+		function Finale.step(session, entry, generation)
+			local object, part, kind = entry.object, entry.part, entry.kind
+			local model, root = character()
+			if not Finale.ready(session, generation) or not root then
+				return false
+			end
+			local objective, checkpoints = session.objectiveKey, session.checkpoints
+			local index, key = tonumber(object:GetAttribute("Index")), nil
+			if kind == "key" or kind == "lock" then
+				key = Finale.key(index)
+			end
+			local allowed = function()
+				return Finale.ready(session, generation)
+					and App.player.Character == model
+					and part:IsDescendantOf(workspace)
+					and session.objectiveKey == objective
+			end
+			local ignore = part
+			if kind == "checkpoint" and part.CanCollide then
+				ignore = nil
+			end
+			local moved =
+				approach(part.Position, generation, ignore, false, allowed, { streamSeconds = 1, settleSeconds = 0.15 })
+			if not moved or not allowed() then
+				return false
+			end
+			session.retry[object] = os.clock() + 3
+			local function changed()
+				return not object:IsDescendantOf(workspace) or session.objectiveKey ~= objective
+			end
+			if kind == "key" or kind == "lock" then
+				if kind == "lock" and not key then
+					return false
+				end
+				local remote = object:FindFirstChild(kind == "key" and "GrabRemote" or "InsertRemote")
+				if not remote or not remote:IsA("RemoteFunction") then
+					return false
+				end
+				App.event7.face(session, part)
+				local ok, accepted = call(remote, function()
+					if allowed() and (root.Position - part.Position).Magnitude <= 10 then
+						return remote:InvokeServer()
+					end
+					return false
+				end, 6, generation)
+				EventInput.release(session)
+				if not ok or accepted ~= true then
+					return false
+				end
+				local confirmed = waitUntil(function()
+					if kind == "key" then
+						return Finale.key(index) ~= nil
+					end
+					return not Finale.key(index) or changed()
+				end, 5, generation)
+				if confirmed then
+					session.visited[object], session.changedAt, session.dirty = true, os.clock(), true
+				end
+				return confirmed ~= nil
+			elseif kind == "prompt" then
+				local held = EventInput.hold(session, object, generation, allowed, {
+					accepted = function()
+						return changed() or not object.Enabled
+					end,
+				})
+				if held then
+					local confirmed = waitUntil(function()
+						Finale.objective(session, generation)
+						return changed() or not object.Enabled
+					end, 3, generation)
+					if confirmed then
+						session.visited[object], session.changedAt = true, os.clock()
+					end
+					return confirmed ~= nil
+				end
+			elseif kind == "checkpoint" then
+				local confirmed = waitUntil(function()
+					return session.checkpoints > checkpoints or changed()
+				end, 2, generation)
+				if confirmed then
+					session.visited[object], session.changedAt = true, os.clock()
+				else
+					session.retry[object] = os.clock() + 20
+				end
+				return confirmed ~= nil
+			elseif kind == "exit" then
+				local remote = getPath(Storage, "Remotes", "FinalExitEnter")
+				if
+					not session.exiting
+					and remote
+					and remote:IsA("RemoteEvent")
+					and allowed()
+					and (root.Position - part.Position).Magnitude <= 10
+					and not Finale.gate(session)
+				then
+					local schedule = session.schedule
+					if schedule.checkPassed("Gate3") then
+						pcall(remote.FireServer, remote, object)
+					end
+				end
+				return waitUntil(function()
+					return session.exiting or Finale.completed()
+				end, 6, generation) ~= nil
+			end
+			return false
+		end
+
+		function Finale.stream(session, generation)
+			if os.clock() < (session.streamAt or 0) then
+				return
+			end
+			session.streamAt = os.clock() + 4
+			local targets = getPath(workspace, "Terrain", "TeleportTargets")
+			local _, root = character()
+			if not targets or not root then
+				return
+			end
+			local points = {}
+			for _, object in ipairs(targets:GetChildren()) do
+				if object:IsA("Attachment") and object.Name:match("^Finale") then
+					table.insert(points, object)
+				end
+			end
+			table.sort(points, function(a, b)
+				return (a.WorldPosition - root.Position).Magnitude < (b.WorldPosition - root.Position).Magnitude
+			end)
+			session.streamCursor = (session.streamCursor or 0) % math.max(1, #points) + 1
+			local point = points[session.streamCursor]
+			if point then
+				call("Finale streaming", function()
+					App.player:RequestStreamAroundAsync(point.WorldPosition, 1)
+				end, 1.5, generation)
+			end
+		end
+
+		function Finale.close(session)
+			EventInput.release(session)
+			if session.zoneAdded then
+				session.zoneAdded:Disconnect()
+				session.zoneAdded = nil
+			end
+			for _, connection in pairs(session.listeners) do
+				connection:Disconnect()
+			end
+			session.listeners, session.bound = {}, {}
+		end
+
+		function Finale.run(generation)
+			if Finale.completed() and App.player:GetAttribute("InFinale") ~= true then
+				return true, "The finale is already finished"
+			end
+			if not waitUntil(function()
+				return App.player:FindFirstChild("Loaded")
+			end, 15, generation) then
+				return false, "Waiting for your Hollow progress"
+			end
+			local client, why = hollowModule("ClientState", generation)
+			if not client then
+				return false, why
+			end
+			local schedule = hollowModule("EventSchedule", generation)
+			if not schedule then
+				return false, "Waiting for the finale schedule"
+			end
+			if App.player:GetAttribute("InFinale") ~= true then
+				if not schedule.checkPassed("FinaleEnd") then
+					return false, "The finale elevator isn't open yet"
+				end
+				local objects = hollowModule("OOPTags", generation)
+				local entrance = nearest("%MazeElevatorEntrance")
+				if not objects or not entrance then
+					return false, "Waiting for the elevator"
+				end
+				status("Entering the finale", "", 0.03)
+				local entered, reason = rideElevator(entrance, client, objects, generation, 10)
+				if not entered then
+					return false, reason
+				end
+			end
+			local session = {
+				client = client,
+				schedule = schedule,
+				items = {},
+				visited = {},
+				retry = {},
+				listeners = {},
+				bound = {},
+				checkpoints = 0,
+				changedAt = os.clock(),
+				dirty = true,
+			}
+			Finale.session = session
+			table.insert(App.cleanups, function()
+				Finale.close(session)
+				if Finale.session == session then
+					Finale.session = nil
+				end
+			end)
+			local deadline = os.clock() + 1800
+			while active(generation) and os.clock() < deadline do
+				Finale.objective(session, generation)
+				Finale.index(session)
+				if Finale.completed() then
+					App.rows.hollow = "Finale finished"
+					return true, "Finale finished"
+				end
+				local packet = session.objective
+				local detail = packet and packet.text or "Waiting for the next objective"
+				if session.exiting then
+					status("Leaving the finale", "Finishing the ending", 0.99)
+				elseif App.player:GetAttribute("InFinale") ~= true then
+					status("Waiting for the finale", "Waiting for your character", 0.05)
+				elseif not Finale.ready(session, generation) then
+					EventInput.release(session)
+					status("Finale", detail, App.progress)
+				else
+					if session.character ~= App.player.Character then
+						session.character, session.visited, session.retry = App.player.Character, {}, {}
+					end
+					local entry = Finale.entries(session)[1]
+					if entry then
+						local titles = {
+							key = "Getting a key",
+							lock = "Unlocking the gate",
+							checkpoint = "Crossing the course",
+							prompt = "Finishing the task",
+							exit = "Heading to the exit",
+						}
+						status(titles[entry.kind], detail, math.min(0.95, 0.08 + session.checkpoints * 0.025))
+						Finale.step(session, entry, generation)
+					else
+						status("Finale", detail, App.progress)
+						Finale.stream(session, generation)
+					end
+				end
+				if os.clock() - session.changedAt > (session.exiting and 180 or 120) then
+					return false,
+						session.exiting and "The ending hasn't saved yet. Check your Hollow progress."
+							or "Can't reach the next task. Move a little further into the course, then press Start."
+				end
+				if not pause(0.15, generation) then
+					break
+				end
+			end
+			return false, active(generation) and "The finale took too long. Press Start to continue." or "Stopped"
+		end
+
+		function Finale.clearMarkers()
+			Finale.markers = false
+			Finale.epoch = (Finale.epoch or 0) + 1
+			for _, visual in pairs(Finale.visuals) do
+				visual.highlight:Destroy()
+				visual.billboard:Destroy()
+			end
+			Finale.visuals = {}
+		end
+
+		function Finale.draw()
+			local items, keep = {}, {}
+			local _, root = character()
+			if App.player:GetAttribute("InFinale") == true then
+				for tag, kind in pairs(tags) do
+					for _, object in ipairs(Collection:GetTagged(tag)) do
+						local part = App.day8.part(object)
+						if part and (kind ~= "key" or not Finale.key(tonumber(object:GetAttribute("Index")))) then
+							table.insert(items, { object = object, part = part, kind = kind })
+						end
+					end
+				end
+			end
+			if root then
+				table.sort(items, function(a, b)
+					return (a.part.Position - root.Position).Magnitude < (b.part.Position - root.Position).Magnitude
+				end)
+			end
+			for index, entry in ipairs(items) do
+				if index > 20 then
+					break
+				end
+				local visual = Finale.visuals[entry.object]
+				if not visual then
+					local highlight = Instance.new("Highlight")
+					highlight.Adornee, highlight.Parent = entry.part, App.gui
+					highlight.FillTransparency, highlight.DepthMode = 0.85, Enum.HighlightDepthMode.AlwaysOnTop
+					highlight.OutlineColor = colors.mint
+					local billboard = Instance.new("BillboardGui")
+					billboard.Size, billboard.StudsOffset, billboard.AlwaysOnTop =
+						UDim2.fromOffset(170, 42), Vector3.new(0, 3, 0), true
+					billboard.Adornee, billboard.Parent = entry.part, App.gui
+					local text = label(billboard, "", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), 13, colors.mint)
+					text.TextStrokeTransparency = 0.2
+					visual = { highlight = highlight, billboard = billboard, text = text }
+					Finale.visuals[entry.object] = visual
+				end
+				local names =
+					{ key = "Key", lock = "Key lock", gate = "Gate", checkpoint = "Checkpoint", exit = "Final exit" }
+				visual.text.Text = names[entry.kind]
+					.. (root and "\n" .. math.floor((entry.part.Position - root.Position).Magnitude) .. " studs" or "")
+				keep[entry.object] = true
+			end
+			for object, visual in pairs(Finale.visuals) do
+				if not keep[object] then
+					visual.highlight:Destroy()
+					visual.billboard:Destroy()
+					Finale.visuals[object] = nil
+				end
+			end
+		end
+
+		function Finale.toggleMarkers()
+			if Finale.markers then
+				Finale.clearMarkers()
+			else
+				Finale.markers = true
+				Finale.epoch = (Finale.epoch or 0) + 1
+				local epoch = Finale.epoch
+				task.spawn(function()
+					while App.alive and Finale.markers and Finale.epoch == epoch do
+						pcall(Finale.draw)
+						task.wait(0.4)
+					end
+				end)
+			end
+			refresh()
+		end
+
+		function Finale.clear()
+			Finale.clearMarkers()
+			if Finale.session then
+				Finale.close(Finale.session)
+				Finale.session = nil
+			end
+		end
+		App.finale = Finale
+	end)()
+end
+
 -- menu
 local function buildUI(parent)
 	local gui = new("ScreenGui", parent, {
@@ -30940,6 +31513,9 @@ local function buildUI(parent)
 		end
 	end
 	if current and current.id == "hollow" then
+		ui.finaleMarkers = button(event, "Finale markers: OFF", UDim2.fromOffset(0, 0), UDim2.new(1, -8, 0, 44), function()
+			App.finale.toggleMarkers()
+		end)
 		local floors =
 			new("Frame", event, { Name = "FloorSelector", Size = UDim2.new(1, -8, 0, 44), BackgroundTransparency = 1 })
 		label(floors, "Floor", UDim2.fromOffset(0, 0), UDim2.new(1, -152, 1, 0), 14)
@@ -30953,7 +31529,7 @@ local function buildUI(parent)
 		end)
 		button(floors, ">", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(44, 44), function()
 			if not App.running then
-				App.floor = math.min(9, App.floor + 1)
+				App.floor = math.min(10, App.floor + 1)
 				refresh()
 			end
 		end)
@@ -31204,6 +31780,12 @@ local function buildUI(parent)
 		end
 		if ui.floor then
 			setProperty(ui.floor, "Text", tostring(App.floor))
+		end
+		if ui.finaleMarkers then
+			local enabled = App.finale and App.finale.markers == true
+			setProperty(ui.finaleMarkers, "Text", "Finale markers: " .. (enabled and "ON" or "OFF"))
+			setProperty(ui.finaleMarkers, "BackgroundColor3", enabled and colors.mint or colors.raised)
+			setProperty(ui.finaleMarkers, "TextColor3", enabled and colors.base or colors.text)
 		end
 		if ui.graveBuying then
 			setProperty(ui.graveBuying, "Text", App.graveAutoBuy and "X" or "")
@@ -31505,6 +32087,9 @@ App.unload = function()
 	App.unloading = true
 	App.generation += 1
 	App.running = false
+	if App.finale then
+		pcall(App.finale.clear)
+	end
 	if App.qol then
 		pcall(App.qol.clear)
 	end
