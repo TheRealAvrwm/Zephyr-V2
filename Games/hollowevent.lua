@@ -1,5 +1,4 @@
 local source = [=[
-if game.PlaceId ~= 116463962153167 then return end
 local Logic = (function()
 local Logic = {}
 
@@ -1047,13 +1046,6 @@ if type(getgenv) == "function" then
 end
 if type(env.__HOLLOW_INFECTION_AIM) == "table" and env.__HOLLOW_INFECTION_AIM.version ~= 3 then
 	env.__HOLLOW_INFECTION_AIM.dispatch = nil
-end
-do
-	local previous = env.__HOLLOW_PANEL
-	local pending = type(previous) == "table" and type(previous.personal) == "table" and previous.personal.pending
-	if pending and previous.player then
-		env.__HOLLOW_PERSONAL_RESUME = { userId = previous.player.UserId, floor = pending.floor, phase = pending.phase }
-	end
 end
 if type(env.__HOLLOW_PANEL) == "table" and type(env.__HOLLOW_PANEL.unload) == "function" then
 	pcall(env.__HOLLOW_PANEL.unload)
@@ -3206,7 +3198,7 @@ local function runHollow(generation)
 			or floor == 8 and Bridge.offeringsCompleted()
 			or floor == 9 and Bridge.leversCompleted()
 	end
-	local completed = App.personal.completed(floor)
+	local completed = saved()
 	local revisitOnly = completed
 		and not App.player:GetAttribute("InMaze")
 		and App.player:GetAttribute("HasRelic") ~= true
@@ -3239,7 +3231,6 @@ local function runHollow(generation)
 		return arrived ~= nil, active(generation) and "Waiting to reach the lobby" or "Stopped"
 	end
 	local function badgeLap()
-		if App.personal then return App.personal.finishFloor(floor, generation) end
 		status("Finishing floor " .. floor, "Quick elevator round trip", 0.95)
 		local entrance = waitUntil(function()
 			return nearest("%MazeElevatorEntrance")
@@ -3481,12 +3472,11 @@ local function runHollow(generation)
 		end
 	end
 	local relic = waitUntil(function()
-		return App.player:GetAttribute("HasRelic") == true
+		return completed or App.player:GetAttribute("HasRelic") == true
 	end, 12, generation)
 	if not relic then
 		return false, "The puzzle opened, but the relic hasn't arrived yet"
 	end
-	if App.personal then App.personal.pending = App.personal.pending or { floor = floor, phase = "return" } end
 	status("Returning the relic", "", 0.9)
 	local returned, returnError = backToLobby()
 	if not returned then
@@ -32193,423 +32183,7 @@ local function buildUI(parent)
 	App.qol.mount()
 end
 
-do
-	(function()
-		local Personal = { done = {}, manual = false, links = {}, speed = 50 }
-		local original, originalStop = runners.hollow, stop
-		local resume = env.__HOLLOW_PERSONAL_RESUME
-		env.__HOLLOW_PERSONAL_RESUME = nil
-
-		-- floor progress
-		function Personal.saved(floor)
-			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
-				if tonumber(number) == floor then
-					return true
-				end
-			end
-			return false
-		end
-
-		function Personal.completed(floor)
-			return Personal.done[floor] == true or Personal.saved(floor)
-		end
-
-		function Personal.returned(floor)
-			return not App.player:GetAttribute("InMaze")
-				and App.player:GetAttribute("HasRelic") ~= true
-				and Personal.saved(floor)
-		end
-
-		function Personal.ride(floor, generation)
-			local client, why = hollowModule("ClientState", generation)
-			if not client then
-				return false, why
-			end
-			local objects, reason = hollowModule("OOPTags", generation)
-			if not objects then
-				return false, reason
-			end
-			local part = waitUntil(function()
-				return nearest(floor and "%MazeElevatorEntrance" or "%MazeElevatorExit")
-			end, 15, generation)
-			if not part then
-				return false, active(generation) and "Waiting for the elevator" or "Stopped"
-			end
-			local ok, detail = rideElevator(part, client, objects, generation, floor)
-			if not ok then
-				return false, detail
-			end
-			local arrived = waitUntil(function()
-				local maze = App.player:GetAttribute("InMaze")
-				return floor and maze == floor or not floor and not maze
-			end, 15, generation)
-			return arrived ~= nil, active(generation) and "Waiting for the elevator to arrive" or "Stopped"
-		end
-
-		function Personal.finishFloor(floor, generation)
-			local pending = Personal.pending
-			if not pending then
-				pending = { floor = floor, phase = "return" }
-				Personal.pending = pending
-			end
-			if pending.floor ~= floor then
-				return false, "Still finishing floor " .. pending.floor
-			end
-			if pending.phase == "return" then
-				local maze = App.player:GetAttribute("InMaze")
-				if maze then
-					if maze ~= floor then
-						return false, "The elevator reached a different floor"
-					end
-					if App.player:GetAttribute("HasRelic") ~= true then
-						return false, "Waiting for the relic"
-					end
-					local ok, why = Personal.ride(nil, generation)
-					if not ok then
-						return false, why
-					end
-				end
-				status("Back to the lobby", "", 0.9)
-				if
-					not waitUntil(function()
-						return not App.player:GetAttribute("InMaze")
-					end, 15, generation)
-				then
-					return false, active(generation) and "Waiting to reach the lobby" or "Stopped"
-				end
-				pending.phase = "enter"
-			end
-			if pending.phase == "enter" then
-				status("Finishing floor " .. floor, "Quick elevator round trip", 0.95)
-				local maze = App.player:GetAttribute("InMaze")
-				if not maze then
-					local ok, why = Personal.ride(floor, generation)
-					if not ok then
-						return false, why
-					end
-				elseif maze ~= floor then
-					return false, "The elevator reached a different floor"
-				end
-				pending.phase = "exit"
-			end
-			if pending.phase == "exit" then
-				local maze = App.player:GetAttribute("InMaze")
-				if maze then
-					if maze ~= floor then
-						return false, "The elevator reached a different floor"
-					end
-					status("Back to the lobby", "", 0.98)
-					local ok, why = Personal.ride(nil, generation)
-					if not ok then
-						return false, why
-					end
-				end
-				if
-					not waitUntil(function()
-						return Personal.returned(floor)
-					end, 15, generation)
-				then
-					return false,
-						active(generation) and "Waiting for floor " .. floor .. "'s credit after the round trip"
-							or "Stopped"
-				end
-			end
-			Personal.done[floor], Personal.pending = true, nil
-			App.rows.hollow = "Relic returned"
-			return true, "Floor " .. floor .. " finished"
-		end
-
-		-- floor 10
-		function Personal.inFinale()
-			return App.player
-				and (App.player:GetAttribute("InFinale") == true or App.player:GetAttribute("InMaze") == 10)
-		end
-
-		function Personal.canMove()
-			local model, root, humanoid = character()
-			return App.alive
-				and Personal.manual
-				and Personal.inFinale()
-				and model
-				and not root.Anchored
-				and not humanoid.Sit
-				and not humanoid.PlatformStand
-				and Personal.client
-				and not Personal.client.isLocked("CharacterBusyState")
-				and not Personal.client.isLocked("Cutscene")
-		end
-
-		function Personal.restore()
-			local humanoid = Personal.humanoid
-			if humanoid and Personal.savedSpeed ~= nil and humanoid.WalkSpeed == Personal.speed then
-				Personal.writing = true
-				pcall(function()
-					humanoid.WalkSpeed = Personal.savedSpeed
-				end)
-				Personal.writing = false
-			end
-		end
-
-		function Personal.sync()
-			local _, _, humanoid = character()
-			if humanoid ~= Personal.humanoid then
-				Personal.restore()
-				if Personal.speedLink then
-					Personal.speedLink:Disconnect()
-					Personal.speedLink = nil
-				end
-				Personal.humanoid, Personal.savedSpeed = humanoid, humanoid and humanoid.WalkSpeed
-				if humanoid then
-					Personal.speedLink = humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-						if Personal.writing or Personal.humanoid ~= humanoid then
-							return
-						end
-						local speed = humanoid.WalkSpeed
-						if speed ~= Personal.speed then
-							Personal.savedSpeed = speed
-						end
-					end)
-				end
-			end
-			if Personal.canMove() and humanoid then
-				if humanoid.WalkSpeed ~= Personal.speed then
-					Personal.writing = true
-					humanoid.WalkSpeed = Personal.speed
-					Personal.writing = false
-				end
-			else
-				Personal.restore()
-			end
-		end
-
-		function Personal.jump()
-			if not Personal.canMove() or os.clock() < (Personal.jumpAt or 0) then
-				return
-			end
-			local _, root, humanoid = character()
-			Personal.jumpAt = os.clock() + 0.12
-			local power = humanoid.UseJumpPower and humanoid.JumpPower
-				or math.sqrt(2 * math.max(0, workspace.Gravity) * math.max(0, humanoid.JumpHeight))
-			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-			local velocity = root.AssemblyLinearVelocity
-			root.AssemblyLinearVelocity = Vector3.new(velocity.X, math.max(velocity.Y, power, 45), velocity.Z)
-		end
-
-		function Personal.disable()
-			Personal.manual = false
-			for _, link in ipairs(Personal.links) do
-				pcall(link.Disconnect, link)
-			end
-			Personal.links = {}
-			if Personal.speedLink then
-				Personal.speedLink:Disconnect()
-				Personal.speedLink = nil
-			end
-			Personal.restore()
-			Personal.humanoid, Personal.savedSpeed, Personal.jumpAt = nil, nil, nil
-		end
-
-		function Personal.enable(generation)
-			local client, why = hollowModule("ClientState", generation)
-			if not client then
-				return false, why
-			end
-			if not active(generation) then
-				return false, "Stopped"
-			end
-			Personal.client = client
-			if Personal.manual then
-				return true
-			end
-			Personal.manual = true
-			local elapsed = 0
-			table.insert(
-				Personal.links,
-				RunService.Heartbeat:Connect(function(delta)
-					elapsed += delta
-					if elapsed >= 0.2 then
-						elapsed = 0
-						pcall(Personal.sync)
-					end
-				end)
-			)
-			table.insert(
-				Personal.links,
-				Input.JumpRequest:Connect(function()
-					pcall(Personal.jump)
-				end)
-			)
-			Personal.sync()
-			return true
-		end
-
-		function Personal.enterFinale(generation)
-			App.floor = 10
-			if not Personal.inFinale() then
-				local client, why = hollowModule("ClientState", generation)
-				if not client then
-					return false, why
-				end
-				local schedule = hollowModule("EventSchedule", generation)
-				if not schedule or not schedule.checkPassed("FinaleEnd") then
-					return false, "The finale elevator isn't open yet"
-				end
-				local objects = hollowModule("OOPTags", generation)
-				local entrance = waitUntil(function()
-					return nearest("%MazeElevatorEntrance")
-				end, 15, generation)
-				if not objects or not entrance then
-					return false, "Waiting for the lobby elevator"
-				end
-				status("Entering floor 10", "Manual from here", 0.95)
-				local entered, reason = rideElevator(entrance, client, objects, generation, 10)
-				if not entered then
-					return false, reason
-				end
-			end
-			if not active(generation) then
-				return false, "Stopped"
-			end
-			local enabled, why = Personal.enable(generation)
-			return enabled, enabled and "Floor 10 manual. Speed 50 + infinite jump. Stop turns them off." or why
-		end
-
-		function Personal.run(generation)
-			if Personal.inFinale() or App.floor == 10 then
-				return Personal.enterFinale(generation)
-			end
-			Personal.disable()
-			status("Checking cleared floors", "", 0)
-			if
-				not waitUntil(function()
-					return App.player:FindFirstChild("Loaded")
-				end, 30, generation)
-			then
-				return false, active(generation) and "Your floor progress is still loading" or "Stopped"
-			end
-			if resume then
-				if
-					resume.userId == App.player.UserId
-					and type(resume.floor) == "number"
-					and resume.floor >= 1
-					and resume.floor <= 9
-					and resume.floor % 1 == 0
-					and (resume.phase == "return" or resume.phase == "enter" or resume.phase == "exit")
-				then
-					Personal.pending = { floor = resume.floor, phase = resume.phase }
-				end
-				resume = nil
-			end
-			if
-				not App.player:GetAttribute("InMaze")
-				and App.player:GetAttribute("HasRelic") == true
-				and not Personal.pending
-			then
-				if not Personal.chooseReturn then
-					Personal.chooseReturn = true
-					return false, "Pick the floor you just cleared, then press Start"
-				end
-				Personal.pending = { floor = App.floor, phase = "enter" }
-				Personal.chooseReturn = nil
-			end
-			local inside = App.player:GetAttribute("InMaze")
-			local order = {}
-			if Personal.pending then
-				table.insert(order, Personal.pending.floor)
-			elseif type(inside) == "number" and inside >= 1 and inside <= 9 then
-				table.insert(order, inside)
-			end
-			for floor = 1, 9 do
-				if floor ~= order[1] then
-					table.insert(order, floor)
-				end
-			end
-			for _, floor in ipairs(order) do
-				if Personal.completed(floor) and not (Personal.pending and Personal.pending.floor == floor) then
-					if App.player:GetAttribute("InMaze") == floor then
-						if App.player:GetAttribute("HasRelic") == true then
-							local ok, why = Personal.ride(nil, generation)
-							if not ok then
-								return false, why
-							end
-							local finished, reason = Personal.finishFloor(floor, generation)
-							if not finished then
-								return false, reason
-							end
-						else
-							local ok, why = Personal.ride(nil, generation)
-							if not ok then
-								return false, why
-							end
-						end
-					end
-					status("Skipping floor " .. floor, "Already cleared", floor / 10)
-					continue
-				end
-				if not active(generation) then
-					return false, "Stopped"
-				end
-				App.floor = floor
-				local finished, reason = false, nil
-				for attempt = 1, 3 do
-					if not active(generation) then
-						return false, "Stopped"
-					end
-					if Personal.inFinale() then
-						return Personal.enterFinale(generation)
-					end
-					App.floor = floor
-					status(
-						"Floor " .. floor .. " / 9",
-						attempt == 1 and "" or "Trying this floor again",
-						(floor - 1) / 10
-					)
-					local ok, success, detail
-					if Personal.pending and Personal.pending.floor == floor then
-						ok, success, detail = pcall(Personal.finishFloor, floor, generation)
-					else
-						ok, success, detail = pcall(original, generation)
-					end
-					cleanRun()
-					if not active(generation) then
-						return false, "Stopped"
-					end
-					if
-						ok
-						and success == true
-						and not App.player:GetAttribute("InMaze")
-						and App.player:GetAttribute("HasRelic") ~= true
-					then
-						finished = true
-						break
-					end
-					reason = ok and detail or tostring(success)
-					if attempt < 3 and not pause(0.6, generation) then
-						return false, "Stopped"
-					end
-				end
-				if not finished then
-					return false, "Floor " .. floor .. ": " .. tostring(reason or "The lobby return wasn't confirmed")
-				end
-				Personal.done[floor] = true
-			end
-			return Personal.enterFinale(generation)
-		end
-
-		stop = function()
-			Personal.disable()
-			originalStop()
-		end
-		App.personal = Personal
-		runners.hollow = Personal.run
-		App.finale.run = Personal.enterFinale
-		current.objective = "Floors 1-9 auto, then floor 10 manual. Stop turns off speed and infinite jump."
-	end)()
-end
-
-
 App.unload = function()
-	if App.personal then pcall(App.personal.disable) end
 	if not App.alive or App.unloading then
 		return
 	end
@@ -32709,7 +32283,7 @@ end)
 ]=]
 local launch, err = loadstring(source)
 if launch then
-    launch(source, 116463962153167)
+    launch(source)
 else
-    warn("[Hollow Personal] " .. tostring(err))
+    warn("[Hollow] " .. tostring(err))
 end
