@@ -32567,6 +32567,27 @@ do
 			return pcall(remote.FireServer, remote, exit)
 		end
 
+		function Personal.portalFor(frame, index, count)
+			local final = index == count
+			return nearest(final and "%FinalExitPortal" or "%WindowPortal", function(part)
+				if not part:IsA("BasePart") or part:GetAttribute("Enabled") == false then
+					return false
+				end
+				local offset = part.Position - frame.Position
+				local flat = Vector3.new(offset.X, 0, offset.Z)
+				if flat.Magnitude < 1 or flat.Magnitude > 40 or math.abs(offset.Y) > 12 then
+					return false
+				end
+				if final then
+					return true
+				end
+				local scene = part:GetAttribute("SceneId")
+				return type(scene) == "string" and scene ~= ""
+					and typeof(part:GetAttribute("Landing")) == "Vector3"
+					and typeof(part:GetAttribute("ViewCFrame")) == "CFrame"
+			end)
+		end
+
 		function Personal.runRoute(generation)
 			local frames = Personal.finalFrames()
 			local _, root = character()
@@ -32611,12 +32632,35 @@ do
 					end
 					part.AssemblyLinearVelocity, part.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
 					part.CFrame = frame
-					if not pause(0.25, generation) then
+					if not pause(4, generation) then
 						return false, "Stopped"
 					end
-					humanoid:MoveTo(frame.Position + frame.LookVector * 8)
-					if index == #frames then
+					local nextStreamAt = 0
+					local portal = waitUntil(function()
+						if not Personal.canMove() then
+							return nil
+						end
+						local found = Personal.portalFor(frame, index, #frames)
+						if not found and os.clock() >= nextStreamAt then
+							nextStreamAt = os.clock() + 2
+							pcall(App.player.RequestStreamAroundAsync, App.player, frame.Position, 1)
+						end
+						return found
+					end, 10, generation)
+					if not portal then
+						return false, Personal.canMove() and "Portal " .. index .. " hasn't loaded"
+							or "Waiting for floor 10 to unlock"
+					end
+					local offset = portal.Position - frame.Position
+					local direction = Vector3.new(offset.X, 0, offset.Z).Unit
+					local forward = portal.Position + direction * 12
+					forward = Vector3.new(forward.X, frame.Position.Y, forward.Z)
+					local moveAgainAt = os.clock() + 0.6
+					local finalExitAt = 0
+					humanoid:MoveTo(forward)
+					if index == #frames and (part.Position - portal.Position).Magnitude < 10 then
 						Personal.openFinalExit(generation)
+						finalExitAt = os.clock() + 1
 					end
 					local arrived = waitUntil(function()
 						if Personal.saved(10) then
@@ -32626,11 +32670,23 @@ do
 						if nowModel ~= model then
 							return nil
 						end
-						if index < #frames then
-							return nowPart.Position.X > frame.Position.X + 100
+						if index < #frames and nowPart.Position.X > frame.Position.X + 100 then
+							return true
 						end
-						return not Personal.inFinale() or (nowPart.Position - frame.Position).Magnitude > 100
-					end, 9, generation)
+						if index == #frames and (not Personal.inFinale() or (nowPart.Position - frame.Position).Magnitude > 100) then
+							return true
+						end
+						if index == #frames and os.clock() >= finalExitAt
+							and (nowPart.Position - portal.Position).Magnitude < 10
+						then
+							Personal.openFinalExit(generation)
+							finalExitAt = os.clock() + 1
+						end
+						if Personal.canMove() and os.clock() >= moveAgainAt then
+							humanoid:MoveTo(forward)
+							moveAgainAt = os.clock() + 0.6
+						end
+					end, 11, generation)
 					if not arrived and App.player.Character == model then
 						humanoid:MoveTo(part.Position)
 					end
