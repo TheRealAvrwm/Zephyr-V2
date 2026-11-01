@@ -32200,6 +32200,88 @@ do
 		local resume = env.__HOLLOW_PERSONAL_RESUME
 		env.__HOLLOW_PERSONAL_RESUME = nil
 
+		local nativeApproach, nativeRide = approach, rideElevator
+		local mirrorStand = CFrame.new(83.568717956543, 33.8530235290527, 9701.748046875, 0.0178413260728121, -3.26964499919313e-09, -0.99984085559845, -3.34069372165402e-09, 1, -3.3297775647867e-09, 0.99984085559845, 3.39956973682831e-09, 0.0178413260728121)
+
+		approach = function(position, generation, ignore, insideCabin, canMove, timing)
+			local moved, reason = nativeApproach(position, generation, ignore, insideCabin, canMove, timing)
+			if moved or reason ~= "Couldn't find a safe place to stand" or insideCabin
+				or App.player:GetAttribute("InMaze") ~= 5 or not active(generation)
+			then
+				return moved, reason
+			end
+			local model, root = character()
+			if not model or canMove and not canMove() then
+				return false, "Movement paused"
+			end
+			pcall(App.player.RequestStreamAroundAsync, App.player, mirrorStand.Position, 2)
+			if not active(generation) or App.player.Character ~= model then
+				return false, "Stopped"
+			end
+			root.AssemblyLinearVelocity, root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+			root.CFrame = mirrorStand
+			return pause(0.15, generation)
+		end
+
+		function Personal.clickDialog()
+			local gui = App.player:FindFirstChild("PlayerGui")
+			gui = gui and gui:FindFirstChild("DialogUI")
+			local panel = gui and gui:FindFirstChild("Dialog_Narrator")
+			local body = panel and panel:FindFirstChild("Body")
+			local line = body and body:FindFirstChild("BodyLabel")
+			if not gui or not gui.Enabled or not line or line.Text == "" then
+				return
+			end
+			local camera = workspace.CurrentCamera
+			if not camera then
+				return
+			end
+			local point = camera.ViewportSize / 2
+			local ok, input = pcall(game.GetService, game, "VirtualInputManager")
+			if ok and pcall(function()
+				input:SendMouseButtonEvent(point.X, point.Y, 0, true, game, 0)
+				input:SendMouseButtonEvent(point.X, point.Y, 0, false, game, 0)
+			end) then
+				return
+			end
+			ok, input = pcall(game.GetService, game, "VirtualUser")
+			if ok and pcall(function()
+				input:Button1Down(point, camera.CFrame)
+				input:Button1Up(point, camera.CFrame)
+			end) then
+				return
+			end
+			if type(mouse1click) == "function" then
+				pcall(mouse1click)
+			end
+		end
+
+		function Personal.watchDialog(generation)
+			if Personal.dialogWatcher == generation or not App.player:FindFirstChild("PlayerGui") then
+				return
+			end
+			Personal.dialogWatcher = generation
+			task.spawn(function()
+				while Personal.dialogWatcher == generation and active(generation)
+					and os.clock() < (Personal.dialogUntil or 0)
+				do
+					pcall(Personal.clickDialog)
+					task.wait(0.18)
+				end
+				if Personal.dialogWatcher == generation then
+					Personal.dialogWatcher = nil
+				end
+			end)
+		end
+
+		rideElevator = function(part, client, objects, generation, floor)
+			Personal.dialogUntil = os.clock() + 160
+			Personal.watchDialog(generation)
+			local entered, reason = nativeRide(part, client, objects, generation, floor)
+			Personal.dialogUntil = os.clock() + 12
+			return entered, reason
+		end
+
 		-- floor progress
 		function Personal.saved(floor)
 			for number in tostring(App.player:GetAttribute("CompletedFloors") or ""):gmatch("%d+") do
@@ -32397,6 +32479,8 @@ do
 
 		function Personal.disable()
 			Personal.manual = false
+			Personal.dialogUntil = 0
+			Personal.dialogWatcher = nil
 			for _, link in ipairs(Personal.links) do
 				pcall(link.Disconnect, link)
 			end
@@ -32443,8 +32527,137 @@ do
 			return true
 		end
 
+		function Personal.finalFrames()
+			return {
+				CFrame.new(-1803.71533203125, 150.602066040039, 371.934112548828, -0.190974712371826, 8.20085261921122e-08, -0.981594979763031, -5.02473831431871e-08, 1, 9.33221002696882e-08, 0.981594979763031, 6.71447395461655e-08, -0.190974712371826),
+				CFrame.new(-1182.77612304688, 238.41389465332, 375.579376220703, 0.0589641518890858, 2.65559774170754e-09, -0.998260080814362, -2.71370953486283e-10, 1, 2.64419730555687e-09, 0.998260080814362, 1.14985930499412e-10, 0.0589641518890858),
+				CFrame.new(-665.093811035156, 373.299774169922, 479.192657470703, -0.0174623765051365, -4.26734878544721e-08, -0.999847531318665, 4.19192183187533e-08, 1, -4.34121183445768e-08, 0.999847531318665, -4.26709050316276e-08, -0.0174623765051365),
+				CFrame.new(150.42919921875, 406.206634521484, 451.281372070312, -0.0046425866894424, 2.30721894922681e-08, -0.999989211559296, -7.75163155886105e-10, 1, 2.30760370811822e-08, 0.999989211559296, 8.82287298775708e-10, -0.0046425866894424),
+				CFrame.new(828.929138183594, 642.766967773438, 484.387664794922, -0.0734623447060585, -3.33846972289109e-09, -0.997298002243042, -3.103937373794e-08, 1, -1.06111186504165e-09, 0.997298002243042, 3.08775511825843e-08, -0.0734623447060585),
+				CFrame.new(1690.46704101562, 988.033081054688, 484.475006103516, -0.0306622516363859, -2.16963291777006e-09, -0.999529778957367, -1.9308876719748e-10, 1, -2.16473017289331e-09, 0.999529778957367, 1.26622476392946e-10, -0.0306622516363859),
+				CFrame.new(2568.7626953125, 1258.078125, 469.715698242188, -0.0727616772055626, 1.08977771251517e-09, -0.997349381446838, -1.47594647614824e-08, 1, 2.16945150732784e-09, 0.997349381446838, 1.48781955644495e-08, -0.0727616772055626),
+				CFrame.new(3597.66162109375, 1162.20678710938, 444.27685546875, -0.0125471167266369, -8.14812821658961e-08, -0.999921262264252, 3.5603915371496e-09, 1, -8.15323701885973e-08, 0.999921262264252, -4.58310722706301e-09, -0.0125471167266369),
+				CFrame.new(4807.10009765625, 1248.80944824219, 444.259063720703, 0.0026991271879524, 8.51083825637033e-08, -0.999996364116669, 8.0033572658067e-08, 1, 8.53247144050329e-08, 0.999996364116669, -8.02635895524872e-08, 0.0026991271879524),
+				CFrame.new(5587.72802734375, 1384.88977050781, 609.425659179688, 0.00624961964786053, 4.4306169399988e-08, -0.999980449676514, 6.45641051733037e-08, 1, 4.47105428236227e-08, 0.999980449676514, -6.48422684434991e-08, 0.00624961964786053),
+				CFrame.new(6380.96142578125, 1434.88098144531, 567.449157714844, -0.0767440795898438, 2.77231304579573e-08, -0.997050821781158, 1.62743560849776e-08, 1, 2.65524775500126e-08, 0.997050821781158, -1.41886147275727e-08, -0.0767440795898438),
+				CFrame.new(7354.95849609375, 1468.10668945312, 539.293212890625, -0.0247410703450441, -5.40957536543374e-08, -0.999693870544434, 2.40235364934449e-09, 1, -5.41717746216364e-08, 0.999693870544434, -3.74188591223401e-09, -0.0247410703450441),
+			}
+		end
+
+		function Personal.openFinalExit(generation)
+			local _, root = character()
+			local exit = root and nearest("%FinalExitPortal", function(part)
+				return part:IsA("BasePart") and part:GetAttribute("Enabled") ~= false
+					and (part.Position - root.Position).Magnitude < 45
+			end)
+			local remote = exit and getPath(Storage, "Remotes", "FinalExitEnter")
+			if not exit or not remote or not remote:IsA("RemoteEvent") or not active(generation) then
+				return false
+			end
+			if (root.Position - exit.Position).Magnitude > 10 then
+				local moved = nativeApproach(exit.Position, generation, exit, false, Personal.canMove)
+				if not moved then
+					return false
+				end
+			end
+			_, root = character()
+			if not root or (root.Position - exit.Position).Magnitude > 10 or not active(generation) then
+				return false
+			end
+			return pcall(remote.FireServer, remote, exit)
+		end
+
+		function Personal.runRoute(generation)
+			local frames = Personal.finalFrames()
+			local _, root = character()
+			if not root then
+				return false, "Waiting for your character"
+			end
+			local first = 1
+			for index, frame in ipairs(frames) do
+				if (root.Position - frame.Position).Magnitude < 180 then
+					first = index
+					break
+				end
+			end
+			for index = first, #frames do
+				local frame = frames[index]
+				local crossed = false
+				for attempt = 1, 3 do
+					if Personal.saved(10) then
+						return true, "Floor 10 finished"
+					end
+					if not active(generation) then
+						return false, "Stopped"
+					end
+					local ready = waitUntil(function()
+						local model, part, humanoid = character()
+						if model and Personal.canMove() then
+							return { model, part, humanoid }
+						end
+					end, 12, generation)
+					if not ready then
+						return false, "Waiting for floor 10 to unlock"
+					end
+					local model, part, humanoid = ready[1], ready[2], ready[3]
+					if index < #frames and part.Position.X > frame.Position.X + 100 then
+						crossed = true
+						break
+					end
+					status("Floor 10", string.format("Portal %d / %d", index, #frames), 0.9 + index / #frames * 0.08)
+					pcall(App.player.RequestStreamAroundAsync, App.player, frame.Position, 2)
+					if not active(generation) or App.player.Character ~= model or not Personal.canMove() then
+						return false, "Floor 10 paused"
+					end
+					part.AssemblyLinearVelocity, part.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+					part.CFrame = frame
+					if not pause(0.25, generation) then
+						return false, "Stopped"
+					end
+					humanoid:MoveTo(frame.Position + frame.LookVector * 8)
+					if index == #frames then
+						Personal.openFinalExit(generation)
+					end
+					local arrived = waitUntil(function()
+						if Personal.saved(10) then
+							return true
+						end
+						local nowModel, nowPart = character()
+						if nowModel ~= model then
+							return nil
+						end
+						if index < #frames then
+							return nowPart.Position.X > frame.Position.X + 100
+						end
+						return not Personal.inFinale() or (nowPart.Position - frame.Position).Magnitude > 100
+					end, 9, generation)
+					if not arrived and App.player.Character == model then
+						humanoid:MoveTo(part.Position)
+					end
+					if arrived then
+						crossed = true
+						break
+					end
+				end
+				if not crossed then
+					return false, "Portal " .. index .. " didn't open. Speed 50 and infinite jump are still on."
+				end
+			end
+			status("Floor 10", "Checking the exit", 0.99)
+			Personal.openFinalExit(generation)
+			if waitUntil(function()
+				return Personal.saved(10)
+			end, 25, generation) then
+				return true, "Floor 10 finished"
+			end
+			return false, "Reached the last portal. Finish the exit manually. Speed 50 and infinite jump are still on."
+		end
+
 		function Personal.enterFinale(generation)
 			App.floor = 10
+			if Personal.saved(10) then
+				return true, "Floor 10 already cleared"
+			end
 			if not Personal.inFinale() then
 				local client, why = hollowModule("ClientState", generation)
 				if not client then
@@ -32461,7 +32674,7 @@ do
 				if not objects or not entrance then
 					return false, "Waiting for the lobby elevator"
 				end
-				status("Entering floor 10", "Manual from here", 0.95)
+				status("Entering floor 10", "", 0.95)
 				local entered, reason = rideElevator(entrance, client, objects, generation, 10)
 				if not entered then
 					return false, reason
@@ -32471,7 +32684,10 @@ do
 				return false, "Stopped"
 			end
 			local enabled, why = Personal.enable(generation)
-			return enabled, enabled and "Floor 10 manual. Speed 50 + infinite jump. Stop turns them off." or why
+			if not enabled then
+				return false, why
+			end
+			return Personal.runRoute(generation)
 		end
 
 		function Personal.run(generation)
@@ -32603,7 +32819,7 @@ do
 		App.personal = Personal
 		runners.hollow = Personal.run
 		App.finale.run = Personal.enterFinale
-		current.objective = "Floors 1-9 auto, then floor 10 manual. Stop turns off speed and infinite jump."
+		current.objective = "Clear all ten floors. Floor 10 has speed 50 and infinite jump if a portal gets stuck."
 	end)()
 end
 
