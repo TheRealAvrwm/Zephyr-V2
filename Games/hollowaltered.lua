@@ -1,3 +1,6 @@
+game:GetService("Players").LocalPlayer:Kick(
+    "Hello User, this script is outdated since the Hollow Event officially ended. Join discord.gg/8gtKvJbgs8 for more OP scripts for events/games."
+)
 local source = [=[
 if game.PlaceId ~= 116463962153167 then return end
 local Logic = (function()
